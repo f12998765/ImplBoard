@@ -22,9 +22,23 @@ ImplBoard/
 │   ├── ImplBoard.spec         # PyInstaller 打包配置（macOS）
 │   ├── build-windows.bat      # Windows 一键构建
 │   └── workflow-build-windows.yml  # GitHub Actions 构建 Windows 包
+├── goapp/                     # Go 原生版（mygo 打包：macOS / Windows / Linux）
 ├── jdy-today/                 # 简道云看板（index.html + 采集服务）
 └── qflow-today/               # 轻流看板（index.html + 采集服务）
 ```
+
+## Go 原生版
+
+`goapp/` 是同一套页面的 Go 重写：三个本地端口 + 内嵌 `assets/`，由 [mygo](https://github.com/egoist/mygo) 打包成原生窗口应用——macOS 上是一个 9.6 MB 的 `.app`，不依赖 Python 与 pywebview。
+
+```bash
+cd goapp
+go tool mygo build -skip-notarize          # 只打本机平台，产物在 goapp/build/<平台>/
+go tool mygo build -platform darwin/arm64,darwin/amd64,windows/amd64,linux/amd64 -skip-notarize
+```
+
+版本号写在 `goapp/mygo.json` 的 `version`，产物文件名都带它，例如 `implboard-0.0.2-arm64.dmg`。
+macOS 未签名（`-skip-notarize`）：首次打开需右键 →「打开」，或 `xattr -dr com.apple.quarantine "实施看板.app"`。
 
 ## 快速开始（源码运行）
 

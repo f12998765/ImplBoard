@@ -1,0 +1,9 @@
+{
+  "name": "实施看板",
+  "slug": "implboard",
+  "identifier": "com.xizero.implboard",
+  "version": "0.0.1",
+  "copyright": "© 2026 ImplBoard",
+  "main": ".",
+  "out": "build"
+}
