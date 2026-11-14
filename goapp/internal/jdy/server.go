@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"implboard/internal/diskstore"
 )
 
 const (
@@ -43,6 +45,9 @@ type Server struct {
 	defaultAppID string
 	workers      int
 	progress     *progressStore
+
+	activeID string
+	disk     *diskstore.Store
 
 	reports map[cacheKey]*reportEntry
 	trends  map[cacheKey]*trendEntry
@@ -83,9 +88,16 @@ func New(opts Options) (*Server, error) {
 		authPath = filepath.Join(dataDir, "jdy_auth.json")
 	}
 
+	disk, derr := diskstore.Open(filepath.Join(dataDir, "cache"), diskstore.DefaultMaxBytes)
+	if derr != nil {
+		// A broken cache directory must not stop the board: fall back to memory.
+		disk = nil
+	}
+
 	s := &Server{
 		authPath:     expandHome(authPath),
 		dataDir:      dataDir,
+		disk:         disk,
 		defaultAppID: DefaultAppID,
 		workers:      defaultWorkers,
 		progress:     newProgressStore(),
@@ -134,6 +146,7 @@ func (s *Server) activate(c *Client, appID string) {
 	defer s.mu.Unlock()
 	s.client = c
 	s.defaultAppID = appID
+	s.activeID = ""
 	s.reports = make(map[cacheKey]*reportEntry)
 	s.trends = make(map[cacheKey]*trendEntry)
 	s.appsCache = nil
@@ -218,6 +231,7 @@ func (s *Server) setAuth(cookie, csrf, host, scheme, appID string, extra map[str
 	_ = saveStore(s.authPath, st)
 
 	s.activate(c, appID)
+	s.setActiveID(asString(prof["id"]))
 	return c, nil
 }
 
@@ -246,6 +260,7 @@ func (s *Server) switchProfile(id string) (Profile, error) {
 	st.Active = id
 	_ = saveStore(s.authPath, st)
 	s.activate(c, c.appID)
+	s.setActiveID(id)
 	return publicProfile(prof, id), nil
 }
 
@@ -274,6 +289,70 @@ func (s *Server) deleteProfile(id string) error {
 	}
 	_ = saveStore(s.authPath, st)
 	return nil
+}
+
+// ---------- 磁盘缓存 ----------
+
+// account is the credential id the cache is namespaced by. Editing a cURL
+// keeps the same id, so its reports stay valid; deleting the account drops them.
+func (s *Server) account() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeID != "" {
+		return s.activeID
+	}
+	st := loadStore(s.authPath)
+	if st.Active != "" {
+		return st.Active
+	}
+	return "_"
+}
+
+func (s *Server) setActiveID(id string) {
+	s.mu.Lock()
+	s.activeID = id
+	s.mu.Unlock()
+}
+
+func (s *Server) loadDiskReport(acct, appID, day string) *Report {
+	if s.disk == nil {
+		return nil
+	}
+	e, ok := s.disk.Get("jdy", acct, appID, day)
+	if !ok {
+		return nil
+	}
+	var rep Report
+	if err := json.Unmarshal(e.Data, &rep); err != nil {
+		return nil
+	}
+	return &rep
+}
+
+func (s *Server) saveDiskReport(acct, appID string, rep *Report) {
+	if s.disk == nil || rep == nil {
+		return
+	}
+	body, err := json.Marshal(rep)
+	if err != nil {
+		return
+	}
+	ts := time.Now().UnixMilli()
+	_ = s.disk.Put("jdy", acct, appID, rep.Date, ts, body)
+}
+
+func (s *Server) diskTotal() int64 {
+	if s.disk == nil {
+		return 0
+	}
+	return s.disk.Total()
+}
+
+func (s *Server) dropDiskCache(acct string) {
+	if s.disk == nil || acct == "" {
+		return
+	}
+	_ = s.disk.Drop("jdy", acct)
 }
 
 // ---------- caches ----------
@@ -335,6 +414,18 @@ func (s *Server) report(appID string, fresh bool, day string) (*Report, error) {
 		day = nowInShanghai().Format("2006-01-02")
 	}
 	key := cacheKey{appID: appID, day: day}
+	acct := s.account()
+
+	// 磁盘里有这个「账号+应用包+日期」就直接用，一次外部请求都不发；
+	// 只有 fresh=1（点刷新）才重新采集并覆盖当天那份。
+	if !fresh {
+		if rep := s.loadDiskReport(acct, appID, day); rep != nil {
+			s.mu.Lock()
+			s.reports[key] = &reportEntry{report: rep, at: unixNow()}
+			s.mu.Unlock()
+			return rep, nil
+		}
+	}
 
 	s.mu.Lock()
 	if hit, ok := s.reports[key]; ok && !fresh && unixNow()-hit.at < reportTTL.Seconds() {
@@ -370,6 +461,7 @@ func (s *Server) report(appID string, fresh bool, day string) (*Report, error) {
 	s.mu.Lock()
 	s.reports[key] = &reportEntry{report: rep, at: unixNow()}
 	s.mu.Unlock()
+	s.saveDiskReport(acct, appID, rep)
 	return rep, nil
 }
 
@@ -466,6 +558,27 @@ func (s *Server) serveGet(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "image/x-icon")
 		w.Header().Set("cache-control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if path == "/api/cache/days" {
+		days := []string{}
+		if s.disk != nil {
+			days = s.disk.Days("jdy", s.account(), r.URL.Query().Get("appId"))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"days": days})
+		return
+	}
+	if path == "/api/cache/size" {
+		var acct int64
+		if s.disk != nil {
+			acct = s.disk.Size("jdy", s.account())
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"account": acct,
+			"total":   s.diskTotal(),
+			"limit":   diskstore.DefaultMaxBytes,
+		})
 		return
 	}
 
@@ -624,6 +737,7 @@ func (s *Server) serveDelete(w http.ResponseWriter, raw []byte) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少 id"})
 		return
 	}
+	defer s.dropDiskCache(id) // 删账号才连缓存一起删
 	if err := s.deleteProfile(id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"implboard/internal/diskstore"
 )
 
 // Options configures a Server.
@@ -39,6 +41,7 @@ type Server struct {
 
 	prog  *progress
 	cache *cache
+	disk  *diskstore.Store
 
 	workers int
 
@@ -70,9 +73,17 @@ func New(opts Options) (*Server, error) {
 
 	seedFromEnv(authPath)
 
+	var disk *diskstore.Store
+	if dir := dataDir; dir != "" {
+		if d, err := diskstore.Open(dir+string(os.PathSeparator)+"cache", diskstore.DefaultMaxBytes); err == nil {
+			disk = d
+		}
+	}
+
 	return &Server{
 		authPath:   authPath,
 		dataDir:    dataDir,
+		disk:       disk,
 		prog:       newProgress(),
 		cache:      newCache(),
 		workers:    workers,
@@ -108,6 +119,31 @@ func (s *Server) serveGet(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "/api/progress" {
 		writeJSON(w, http.StatusOK, s.prog.snapshot())
+		return
+	}
+	if path == "/api/cache/days" {
+		days := []string{}
+		if s.disk != nil {
+			if prof := s.activeProfile(); prof != nil {
+				days = s.disk.Days("qf", prof.ID, "")
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"days": days})
+		return
+	}
+	if path == "/api/cache/size" {
+		var acct, total int64
+		if s.disk != nil {
+			total = s.disk.Total()
+			if prof := s.activeProfile(); prof != nil {
+				acct = s.disk.Size("qf", prof.ID)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"account": acct,
+			"total":   total,
+			"limit":   diskstore.DefaultMaxBytes,
+		})
 		return
 	}
 
@@ -230,6 +266,7 @@ func (s *Server) servePost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		cfg.Profiles = kept
+		s.dropDiskCache(id)
 		if cfg.Active != nil && *cfg.Active == id {
 			if len(kept) > 0 {
 				cfg.setActive(kept[0].ID)

@@ -1,6 +1,7 @@
 package qf
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -274,6 +275,14 @@ func orDash(v string) string {
 // buildReport returns the cached report for a day unless fresh is set.
 func (s *Server) buildReport(api *qfAPI, day string, fresh bool) (*Report, error) {
 	key := reportKey{Profile: profileKey(api.token), Day: day}
+
+	// 磁盘里有这个「账号+日期」就直接返回，只有 fresh=1 才重新采集并覆盖当天那份。
+	if !fresh {
+		if rep := s.loadDiskReport(day); rep != nil {
+			s.cache.storeReport(key, rep)
+			return rep, nil
+		}
+	}
 	if !fresh {
 		if rep, ok := s.cache.report(key); ok {
 			return rep, nil
@@ -290,6 +299,53 @@ func (s *Server) buildReport(api *qfAPI, day string, fresh bool) (*Report, error
 		}
 	}
 	return s.buildReportLocked(api, day, key)
+}
+
+// ---------- 磁盘缓存 ----------
+
+func (s *Server) loadDiskReport(day string) *Report {
+	if s.disk == nil {
+		return nil
+	}
+	prof := s.activeProfile()
+	if prof == nil {
+		return nil
+	}
+	e, ok := s.disk.Get("qf", prof.ID, "", day)
+	if !ok {
+		return nil
+	}
+	var rep Report
+	if err := unmarshalJSON(e.Data, &rep); err != nil {
+		return nil
+	}
+	return &rep
+}
+
+func (s *Server) saveDiskReport(rep *Report) {
+	if s.disk == nil || rep == nil {
+		return
+	}
+	prof := s.activeProfile()
+	if prof == nil {
+		return
+	}
+	body, err := json.Marshal(rep)
+	if err != nil {
+		return
+	}
+	day := rep.Day
+	if day == "" {
+		day = today()
+	}
+	_ = s.disk.Put("qf", prof.ID, "", day, nowMillis(), body)
+}
+
+func (s *Server) dropDiskCache(id string) {
+	if s.disk == nil || id == "" {
+		return
+	}
+	_ = s.disk.Drop("qf", id)
 }
 
 // appStats is what one worker produces for one application.
@@ -412,6 +468,7 @@ func (s *Server) buildReportLocked(api *qfAPI, day string, key reportKey) (*Repo
 		GeneratedAt: nowMillis(),
 	}
 	s.cache.storeReport(key, report)
+	s.saveDiskReport(report)
 
 	s.prog.finish(len(apps))
 	s.prog.log(fmt.Sprintf("完成：%d 个应用，当日发布 %d 个", len(apps), published))

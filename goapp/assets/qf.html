@@ -636,7 +636,7 @@
       var act = (d.profiles||[]).filter(function(p){ return p.id===d.active; })[0];
       $("acct").title = act ? ("账号："+act.name+" · wsid "+act.wsid) : "未连接账号";
       state.acct = (d && d.active) || "-";
-      return cacheOpen().then(function(){ refreshCacheMeta(); return d; });
+      return refreshCacheMeta().then(function(){ return refreshCacheDays(); }).then(function(){ return d; });
     });
   }
 
@@ -647,128 +647,10 @@
     }, 600);
   }
 
-  // ---------- 本地缓存（IndexedDB）：key = 账号 + 日期 ----------
-  // 有缓存就不发请求（首屏 / 切账号 / 切日期都一样）；只有点「刷新」才重新拉，
-  // 拉到就覆盖同一 key。总占用上限 500MB，超了从最旧日期开始删，不同日期互不影响。
-  var CACHE_DB = "implboard-cache";
-  var CACHE_META = "meta";
-  var CACHE_DATA = "data";
-  var CACHE_CAP = 500 * 1024 * 1024;
-  var LEGACY_KEY = ["qf","report","v2"].join(".");
-  var cacheDB = null, cacheTotal = 0, cacheBytes = 0, cacheOpening = null;
-  try { localStorage.removeItem(LEGACY_KEY); } catch(e){}
-
-  function cacheOpen(){
-    if(cacheOpening) return cacheOpening;
-    cacheOpening = new Promise(function(resolve){
-      if(!window.indexedDB){ resolve(null); return; }
-      var req = indexedDB.open(CACHE_DB, 1);
-      req.onupgradeneeded = function(){
-        var db = req.result;
-        if(!db.objectStoreNames.contains(CACHE_META)){
-          var m = db.createObjectStore(CACHE_META, { keyPath: "k" });
-          m.createIndex("acct", "acct", { unique: false });
-        }
-        if(!db.objectStoreNames.contains(CACHE_DATA)) db.createObjectStore(CACHE_DATA, { keyPath: "k" });
-      };
-      req.onsuccess = function(){ cacheDB = req.result; cacheScan(); resolve(cacheDB); };
-      req.onerror = function(){ resolve(null); };
-    });
-    return cacheOpening;
-  }
-
-  function cacheKeyOf(day){ return (state.acct||"-") + "||" + day; }
-
-  function cacheScan(){
-    if(!cacheDB) return;
-    cacheTotal = 0;
-    var cur = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).openCursor();
-    cur.onsuccess = function(e){
-      var c = e.target.result;
-      if(c){ cacheTotal += c.value.bytes||0; c.continue(); }
-    };
-  }
-
-  function cacheGet(day){
-    return cacheOpen().then(function(db){
-      if(!db) return null;
-      var k = cacheKeyOf(day);
-      return new Promise(function(resolve){
-        var tx = db.transaction([CACHE_META, CACHE_DATA], "readonly");
-        var m = tx.objectStore(CACHE_META).get(k);
-        m.onsuccess = function(){
-          if(!m.result){ resolve(null); return; }
-          var d = tx.objectStore(CACHE_DATA).get(k);
-          d.onsuccess = function(){ resolve(d.result && d.result.data ? {ts:m.result.ts, data:d.result.data} : null); };
-          d.onerror = function(){ resolve(null); };
-        };
-        m.onerror = function(){ resolve(null); };
-      });
-    });
-  }
-
-  function cacheSet(day, data){
-    return cacheOpen().then(function(db){
-      if(!db) return;
-      var k = cacheKeyOf(day);
-      var json = JSON.stringify(data);
-      var bytes = typeof TextEncoder !== "undefined" ? new TextEncoder().encode(json).length : json.length*2;
-      return new Promise(function(resolve){
-        var tx = db.transaction([CACHE_META, CACHE_DATA], "readwrite");
-        var meta = tx.objectStore(CACHE_META);
-        var prev = meta.get(k);
-        prev.onsuccess = function(){
-          meta.put({ k:k, acct:state.acct||"-", appId:"", day:day, ts:Date.now(), bytes:bytes });
-          tx.objectStore(CACHE_DATA).put({ k:k, data:data });
-          cacheTotal += bytes - (prev.result ? prev.result.bytes||0 : 0);
-          tx.oncomplete = function(){ cacheTrim(); refreshCacheMeta(); resolve(); };
-          tx.onerror = function(){ resolve(); };
-        };
-        prev.onerror = function(){ resolve(); };
-      });
-    });
-  }
-
-  function cacheTrim(){
-    if(!cacheDB || cacheTotal <= CACHE_CAP) return;
-    var items = [];
-    var cur = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).openCursor();
-    cur.onsuccess = function(e){
-      var c = e.target.result;
-      if(c){ items.push({k:c.value.k, ts:c.value.ts||0, bytes:c.value.bytes||0}); c.continue(); return; }
-      items.sort(function(a,b){ return a.ts-b.ts; });
-      var over = cacheTotal - CACHE_CAP, dead = [];
-      for(var i=0; i<items.length && over>0; i++){ dead.push(items[i].k); over -= items[i].bytes; }
-      if(!dead.length) return;
-      var tx = cacheDB.transaction([CACHE_META, CACHE_DATA], "readwrite");
-      dead.forEach(function(k){
-        tx.objectStore(CACHE_META).delete(k);
-        tx.objectStore(CACHE_DATA).delete(k);
-      });
-      tx.oncomplete = function(){ cacheScan(); refreshCacheMeta(); };
-    };
-  }
-
-  // 删账号才连缓存一起删；编辑 cURL 不改 id，缓存保留
-  function cacheDropAccount(acct){
-    return cacheOpen().then(function(db){
-      if(!db || !acct) return;
-      var keys = [];
-      var idx = db.transaction(CACHE_META, "readonly").objectStore(CACHE_META).index("acct");
-      var cur = idx.openCursor(IDBKeyRange.only(acct));
-      cur.onsuccess = function(e){
-        var c = e.target.result;
-        if(c){ keys.push(c.value.k); c.continue(); return; }
-        if(!keys.length) return;
-        var tx = db.transaction([CACHE_META, CACHE_DATA], "readwrite");
-        keys.forEach(function(k){
-          tx.objectStore(CACHE_META).delete(k);
-          tx.objectStore(CACHE_DATA).delete(k);
-        });
-        tx.oncomplete = function(){ cacheScan(); refreshCacheMeta(); };
-      };
-    });
-  }
+  // ---------- 缓存：由后端落盘（账号 + 日期） ----------
+  // 有缓存就不发请求、点刷新覆盖当日、500MB 上限、删账号连带清缓存，
+  // 全部在 Go 后端完成；前端只显示占用大小和日期圆点。
+  var cacheDays = {}, cacheBytes = 0;
 
   function fmtBytes(b){
     if(!b) return "";
@@ -784,28 +666,22 @@
   }
 
   function refreshCacheMeta(){
-    if(!cacheDB){ paintCacheSize(); return; }
-    var acct = state.acct || "-";
-    var days = {}, bytes = 0;
-    var idx = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).index("acct");
-    var cur = idx.openCursor(IDBKeyRange.only(acct));
-    cur.onsuccess = function(e){
-      var c = e.target.result;
-      if(c){
-        var v = c.value;
-        days[v.day] = 1;
-        bytes += v.bytes || 0;
-        c.continue();
-        return;
-      }
-      state.cacheDays = days;
-      cacheBytes = bytes;
+    return api("/api/cache/size").then(function(j){
+      cacheBytes = (j && j.account) || 0;
       paintCacheSize();
-      if(window.__dpSync) window.__dpSync();
-    };
+    }).catch(function(){ paintCacheSize(); });
   }
 
-  window.__dpCacheDays = function(){ return state.cacheDays || {}; };
+  function refreshCacheDays(){
+    return api("/api/cache/days").then(function(j){
+      var out = {};
+      ((j && j.days) || []).forEach(function(d){ out[d] = 1; });
+      cacheDays = out;
+      if(window.__dpSync) window.__dpSync();
+    }).catch(function(){});
+  }
+
+  window.__dpCacheDays = function(){ return cacheDays || {}; };
 
   function agoLong(ms){
     var m = Math.floor(ms/60000);
@@ -842,14 +718,8 @@
   function run(fresh){
     if(state.busy){ state.pending = true; return; }
     state.day = $("day").value || today();
-    if(!fresh){
-      // 有缓存就直接渲染，不请求；缓存层异常则退回网络
-      return cacheGet(state.day).then(function(hit){
-        if(hit){ applyReport(hit.data, hit.ts); refreshCacheMeta(); return; }
-        return fetchReport(false);
-      }).catch(function(){ return fetchReport(false); });
-    }
-    return fetchReport(true);
+    // 后端有该日期缓存就直接回缓存；点刷新（fresh=1）才重新采集
+    return fetchReport(!!fresh);
   }
 
   function fetchReport(force){
@@ -868,8 +738,9 @@
         clearInterval(state.poll);
         state.data = rep;
         state.dataTs = Date.now();
-        cacheSet(rep.day || state.day, rep);
         render(rep);
+        refreshCacheMeta();
+        refreshCacheDays();
         hideProgress();
         $("genAt").textContent = new Date().toLocaleTimeString("zh-CN",{hour12:false}) +
           "（"+((Date.now()-t0)/1000).toFixed(1)+"s）";
@@ -1145,7 +1016,7 @@
           api("/api/auth", {method:"POST", headers:{"content-type":"application/json"},
             body: JSON.stringify({op:"delete", id:b.getAttribute("data-del")})})
             .then(function(){
-              cacheDropAccount(b.getAttribute("data-del")).then(loadAuth);
+              refreshCacheMeta();
               state.data = null;
               $("board").style.display = "none";
               renderProfiles();
