@@ -115,7 +115,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      # runner 镜像自带 Android SDK / platform-tools / NDK，setup-android@v3 反而会
+      # 因为镜像里 cmdline-tools 版本更新而报 "Wrong version in preinstalled sdkmanager"
+      - name: 检查 Android SDK
+        run: |
+          if [ -z "${ANDROID_HOME:-}" ] && [ -z "${ANDROID_SDK_ROOT:-}" ]; then
+            echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+            echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          fi
+          echo "ANDROID_HOME=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-未设置}}"
+          sdkmanager --list_installed 2>/dev/null | head -15 || true
 
       - uses: gradle/actions/setup-gradle@v4
         with:
