@@ -47,6 +47,7 @@
   /* 桌面端把这组按钮摊平在工具条里；手机上收进「⋯」菜单 */
   .more{display:contents}
   #acct{order:-5}
+  .acctsize{color:var(--text-3);font-size:11px;margin-left:5px;font-variant-numeric:tabular-nums}
   .dpwrap{order:-4}
   #todayBtn{order:-3}
   .select-wrap{order:-2}
@@ -366,7 +367,7 @@
     <div class="controls">
       <button id="acct" title="令牌管理">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l8 4v6c0 4.2-3.4 7.4-8 8-4.6-.6-8-3.8-8-8V7l8-4z"/><path d="M9 12l2 2 4-4"/></svg>
-        账号
+        账号<span id="acctSize" class="acctsize"></span>
       </button>
       <div class="dpwrap" id="dpWrap">
         <button class="dpbtn" id="dpBtn" type="button" title="选择日期" aria-haspopup="dialog">
@@ -537,7 +538,7 @@
 <script>
 (function () {
   "use strict";
-  var state = { day:"", data:null, q:"", collapsed:{}, busy:false, pending:false, poll:null };
+  var state = { day:"", data:null, q:"", collapsed:{}, busy:false, pending:false, poll:null, acct:"-", cacheDays:{} };
   var $ = function (id) { return document.getElementById(id); };
 
   function today(){
@@ -634,7 +635,8 @@
     return api("/api/auth").then(function(d){
       var act = (d.profiles||[]).filter(function(p){ return p.id===d.active; })[0];
       $("acct").title = act ? ("账号："+act.name+" · wsid "+act.wsid) : "未连接账号";
-      return d;
+      state.acct = (d && d.active) || "-";
+      return cacheOpen().then(function(){ refreshCacheMeta(); return d; });
     });
   }
 
@@ -645,29 +647,166 @@
     }, 600);
   }
 
-  // ---------- 本地缓存（切换日期不再重复请求） ----------
-  var CACHE_KEY = ["qf","report","v2"].join(".");
-  var CACHE_MAX = 15;
-  function cacheAll(){ try{ return JSON.parse(localStorage.getItem(CACHE_KEY)||"{}"); }catch(e){ return {}; } }
-  function cacheGet(day){ var v = cacheAll()[day]; return v && v.data ? v : null; }
-  function cacheSet(day, data){
-    try{
-      var all = cacheAll();
-      all[day] = { ts: Date.now(), data: data };
-      var keys = Object.keys(all);
-      if(keys.length > CACHE_MAX){
-        keys.sort(function(a,b){ return all[a].ts - all[b].ts; });
-        keys.slice(0, keys.length-CACHE_MAX).forEach(function(k){ delete all[k]; });
-      }
-      localStorage.setItem(CACHE_KEY, JSON.stringify(all));
-    }catch(e){}
+  // ---------- 本地缓存（IndexedDB）：key = 账号 + 日期 ----------
+  // 有缓存就不发请求（首屏 / 切账号 / 切日期都一样）；只有点「刷新」才重新拉，
+  // 拉到就覆盖同一 key。总占用上限 500MB，超了从最旧日期开始删，不同日期互不影响。
+  var CACHE_DB = "implboard-cache";
+  var CACHE_META = "meta";
+  var CACHE_DATA = "data";
+  var CACHE_CAP = 500 * 1024 * 1024;
+  var LEGACY_KEY = ["qf","report","v2"].join(".");
+  var cacheDB = null, cacheTotal = 0, cacheBytes = 0, cacheOpening = null;
+  try { localStorage.removeItem(LEGACY_KEY); } catch(e){}
+
+  function cacheOpen(){
+    if(cacheOpening) return cacheOpening;
+    cacheOpening = new Promise(function(resolve){
+      if(!window.indexedDB){ resolve(null); return; }
+      var req = indexedDB.open(CACHE_DB, 1);
+      req.onupgradeneeded = function(){
+        var db = req.result;
+        if(!db.objectStoreNames.contains(CACHE_META)){
+          var m = db.createObjectStore(CACHE_META, { keyPath: "k" });
+          m.createIndex("acct", "acct", { unique: false });
+        }
+        if(!db.objectStoreNames.contains(CACHE_DATA)) db.createObjectStore(CACHE_DATA, { keyPath: "k" });
+      };
+      req.onsuccess = function(){ cacheDB = req.result; cacheScan(); resolve(cacheDB); };
+      req.onerror = function(){ resolve(null); };
+    });
+    return cacheOpening;
   }
-  // 日期控件用：返回有缓存的日期集合
-  window.__dpCacheDays = function () {
-    var all = cacheAll(), out = {};
-    Object.keys(all).forEach(function (k) { out[k] = 1; });
-    return out;
-  };
+
+  function cacheKeyOf(day){ return (state.acct||"-") + "||" + day; }
+
+  function cacheScan(){
+    if(!cacheDB) return;
+    cacheTotal = 0;
+    var cur = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).openCursor();
+    cur.onsuccess = function(e){
+      var c = e.target.result;
+      if(c){ cacheTotal += c.value.bytes||0; c.continue(); }
+    };
+  }
+
+  function cacheGet(day){
+    return cacheOpen().then(function(db){
+      if(!db) return null;
+      var k = cacheKeyOf(day);
+      return new Promise(function(resolve){
+        var tx = db.transaction([CACHE_META, CACHE_DATA], "readonly");
+        var m = tx.objectStore(CACHE_META).get(k);
+        m.onsuccess = function(){
+          if(!m.result){ resolve(null); return; }
+          var d = tx.objectStore(CACHE_DATA).get(k);
+          d.onsuccess = function(){ resolve(d.result && d.result.data ? {ts:m.result.ts, data:d.result.data} : null); };
+          d.onerror = function(){ resolve(null); };
+        };
+        m.onerror = function(){ resolve(null); };
+      });
+    });
+  }
+
+  function cacheSet(day, data){
+    return cacheOpen().then(function(db){
+      if(!db) return;
+      var k = cacheKeyOf(day);
+      var json = JSON.stringify(data);
+      var bytes = typeof TextEncoder !== "undefined" ? new TextEncoder().encode(json).length : json.length*2;
+      return new Promise(function(resolve){
+        var tx = db.transaction([CACHE_META, CACHE_DATA], "readwrite");
+        var meta = tx.objectStore(CACHE_META);
+        var prev = meta.get(k);
+        prev.onsuccess = function(){
+          meta.put({ k:k, acct:state.acct||"-", appId:"", day:day, ts:Date.now(), bytes:bytes });
+          tx.objectStore(CACHE_DATA).put({ k:k, data:data });
+          cacheTotal += bytes - (prev.result ? prev.result.bytes||0 : 0);
+          tx.oncomplete = function(){ cacheTrim(); refreshCacheMeta(); resolve(); };
+          tx.onerror = function(){ resolve(); };
+        };
+        prev.onerror = function(){ resolve(); };
+      });
+    });
+  }
+
+  function cacheTrim(){
+    if(!cacheDB || cacheTotal <= CACHE_CAP) return;
+    var items = [];
+    var cur = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).openCursor();
+    cur.onsuccess = function(e){
+      var c = e.target.result;
+      if(c){ items.push({k:c.value.k, ts:c.value.ts||0, bytes:c.value.bytes||0}); c.continue(); return; }
+      items.sort(function(a,b){ return a.ts-b.ts; });
+      var over = cacheTotal - CACHE_CAP, dead = [];
+      for(var i=0; i<items.length && over>0; i++){ dead.push(items[i].k); over -= items[i].bytes; }
+      if(!dead.length) return;
+      var tx = cacheDB.transaction([CACHE_META, CACHE_DATA], "readwrite");
+      dead.forEach(function(k){
+        tx.objectStore(CACHE_META).delete(k);
+        tx.objectStore(CACHE_DATA).delete(k);
+      });
+      tx.oncomplete = function(){ cacheScan(); refreshCacheMeta(); };
+    };
+  }
+
+  // 删账号才连缓存一起删；编辑 cURL 不改 id，缓存保留
+  function cacheDropAccount(acct){
+    return cacheOpen().then(function(db){
+      if(!db || !acct) return;
+      var keys = [];
+      var idx = db.transaction(CACHE_META, "readonly").objectStore(CACHE_META).index("acct");
+      var cur = idx.openCursor(IDBKeyRange.only(acct));
+      cur.onsuccess = function(e){
+        var c = e.target.result;
+        if(c){ keys.push(c.value.k); c.continue(); return; }
+        if(!keys.length) return;
+        var tx = db.transaction([CACHE_META, CACHE_DATA], "readwrite");
+        keys.forEach(function(k){
+          tx.objectStore(CACHE_META).delete(k);
+          tx.objectStore(CACHE_DATA).delete(k);
+        });
+        tx.oncomplete = function(){ cacheScan(); refreshCacheMeta(); };
+      };
+    });
+  }
+
+  function fmtBytes(b){
+    if(!b) return "";
+    if(b < 1024) return b + " B";
+    if(b < 1024*1024) return (b/1024).toFixed(0) + " KB";
+    if(b < 1024*1024*1024) return (b/1048576).toFixed(b < 10485760 ? 1 : 0) + " MB";
+    return (b/1073741824).toFixed(2) + " GB";
+  }
+
+  function paintCacheSize(){
+    var el = $("acctSize");
+    if(el) el.textContent = cacheBytes ? fmtBytes(cacheBytes) : "";
+  }
+
+  function refreshCacheMeta(){
+    if(!cacheDB){ paintCacheSize(); return; }
+    var acct = state.acct || "-";
+    var days = {}, bytes = 0;
+    var idx = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).index("acct");
+    var cur = idx.openCursor(IDBKeyRange.only(acct));
+    cur.onsuccess = function(e){
+      var c = e.target.result;
+      if(c){
+        var v = c.value;
+        days[v.day] = 1;
+        bytes += v.bytes || 0;
+        c.continue();
+        return;
+      }
+      state.cacheDays = days;
+      cacheBytes = bytes;
+      paintCacheSize();
+      if(window.__dpSync) window.__dpSync();
+    };
+  }
+
+  window.__dpCacheDays = function(){ return state.cacheDays || {}; };
+
   function agoLong(ms){
     var m = Math.floor(ms/60000);
     if(m < 1) return "刚刚";
@@ -704,9 +843,16 @@
     if(state.busy){ state.pending = true; return; }
     state.day = $("day").value || today();
     if(!fresh){
-      var hit = cacheGet(state.day);
-      if(hit){ applyReport(hit.data, hit.ts); return; }
+      // 有缓存就直接渲染，不请求；缓存层异常则退回网络
+      return cacheGet(state.day).then(function(hit){
+        if(hit){ applyReport(hit.data, hit.ts); refreshCacheMeta(); return; }
+        return fetchReport(false);
+      }).catch(function(){ return fetchReport(false); });
     }
+    return fetchReport(true);
+  }
+
+  function fetchReport(force){
     state.busy = true;
     $("refresh").disabled = true;
     $("refreshIcon").classList.add("spin");
@@ -717,7 +863,7 @@
     showProgress();
     pollProgress();
     var t0 = Date.now();
-    return api("/api/report?day="+encodeURIComponent(state.day)+(fresh?"&fresh=1":""))
+    return api("/api/report?day="+encodeURIComponent(state.day)+(force?"&fresh=1":""))
       .then(function(rep){
         clearInterval(state.poll);
         state.data = rep;
@@ -989,7 +1135,8 @@
         b.onclick = function(){
           api("/api/auth", {method:"POST", headers:{"content-type":"application/json"},
             body: JSON.stringify({op:"switch", id:b.getAttribute("data-use")})})
-            .then(function(){ state.data=null; closeAuth(); run(true); });
+            .then(function(){ state.data=null; return loadAuth(); })
+            .then(function(){ closeAuth(); run(false); });
         };
       });
       Array.prototype.forEach.call($("profList").querySelectorAll("[data-del]"), function(b){
@@ -998,6 +1145,7 @@
           api("/api/auth", {method:"POST", headers:{"content-type":"application/json"},
             body: JSON.stringify({op:"delete", id:b.getAttribute("data-del")})})
             .then(function(){
+              cacheDropAccount(b.getAttribute("data-del")).then(loadAuth);
               state.data = null;
               $("board").style.display = "none";
               renderProfiles();
@@ -1022,7 +1170,7 @@
         state.data = null;
         return loadAuth();
       })
-      .then(function(){ closeAuth(); run(true); })
+      .then(function(){ closeAuth(); run(false); })
       .catch(function(e){ msg.className = "authmsg"; msg.textContent = e.message; })
       .then(function(){ $("authBtn").disabled = false; });
   }

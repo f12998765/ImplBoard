@@ -47,6 +47,7 @@
   /* 桌面端把这组按钮摊平在工具条里；手机上收进「⋯」菜单 */
   .more{display:contents}
   #acct{order:-5}
+  .acctsize{color:var(--text-3);font-size:11px;margin-left:5px;font-variant-numeric:tabular-nums}
   .dpwrap{order:-4}
   #todayBtn{order:-3}
   .select-wrap{order:-2}
@@ -366,7 +367,7 @@
     <div class="controls">
       <button id="acct" title="登录态 / Cookie 管理">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3l8 4v6c0 4.2-3.4 7.4-8 8-4.6-.6-8-3.8-8-8V7l8-4z"/><path d="M9 12l2 2 4-4"/></svg>
-        账号
+        账号<span id="acctSize" class="acctsize"></span>
       </button>
       <div class="dpwrap" id="dpWrap">
         <button class="dpbtn" id="dpBtn" type="button" title="选择日期" aria-haspopup="dialog">
@@ -548,7 +549,8 @@
 <script>
 (function () {
   var state = {
-    appId: "", day: "", apps: [], data: null, q: "", collapsed: {}, trend: null, trendApp: ""
+    appId: "", day: "", apps: [], data: null, q: "", collapsed: {}, trend: null, trendApp: "",
+    acct: "-", cacheDays: {}
   };
   var $ = function (id) { return document.getElementById(id); };
 
@@ -1028,6 +1030,7 @@
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
         .then(function (res) {
           if (!res.ok) throw new Error(res.j && res.j.error ? res.j.error : "删除失败");
+          cacheDropAccount(id).then(refreshAcct);   // 删账号才连缓存一起删
           loadProfiles();
           if (!res.j.auth) { state.data = null; state.appId = ""; showAuth(false); }
         })
@@ -1096,38 +1099,182 @@
       });
   }
 
-  // ---------- 本地缓存（切换日期/应用包不再重复请求） ----------
-  var CACHE_KEY = ["jdy","report","v2"].join(".");
-  var CACHE_MAX = 20;
+  // ---------- 本地缓存（IndexedDB）：key = 账号 + 应用包 + 日期 ----------
+  // 规则：只要这个 key 有缓存就不发请求（首屏 / 切账号 / 切日期 / 切应用包都一样）；
+  // 只有点「刷新」才重新拉，拉到就覆盖同一 key（同一天多次刷新只留最新）。
+  // 总占用上限 500MB，超了从最旧的日期开始删；不同日期互不影响。
+  var CACHE_DB = "implboard-cache";
+  var CACHE_META = "meta";   // {k, acct, appId, day, ts, bytes}
+  var CACHE_DATA = "data";   // {k, data}
+  var CACHE_CAP = 500 * 1024 * 1024;
+  var LEGACY_KEY = ["jdy","report","v2"].join(".");
   var LAST_KEY = ["jdy","last"].join(".");
-  function cacheAll() { try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "{}"); } catch (e) { return {}; } }
-  function cacheGet(appId, day) {
-    var all = cacheAll(), v = all[appId + "|" + day];
-    return v && v.data ? v : null;
-  }
-  function cacheSet(appId, day, data) {
-    try {
-      var all = cacheAll();
-      all[appId + "|" + day] = { ts: Date.now(), data: data };
-      var keys = Object.keys(all);
-      if (keys.length > CACHE_MAX) {
-        keys.sort(function (a, b) { return all[a].ts - all[b].ts; });
-        keys.slice(0, keys.length - CACHE_MAX).forEach(function (k) { delete all[k]; });
-      }
-      localStorage.setItem(CACHE_KEY, JSON.stringify(all));
-    } catch (e) {}
-  }
-  // 日期控件用：返回有缓存的日期集合（选中应用包时只看这个包）
-  window.__dpCacheDays = function () {
-    var all = cacheAll(), out = {};
-    Object.keys(all).forEach(function (k) {
-      var i = k.indexOf("|");
-      if (i < 0) return;
-      if (state.appId && k.slice(0, i) !== state.appId) return;
-      out[k.slice(i + 1)] = 1;
+  var cacheDB = null, cacheTotal = 0, cacheBytes = 0, cacheOpening = null;
+  try { localStorage.removeItem(LEGACY_KEY); } catch (e) {}
+
+  function cacheOpen() {
+    if (cacheOpening) return cacheOpening;
+    cacheOpening = new Promise(function (resolve) {
+      if (!window.indexedDB) { resolve(null); return; }
+      var req = indexedDB.open(CACHE_DB, 1);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains(CACHE_META)) {
+          var m = db.createObjectStore(CACHE_META, { keyPath: "k" });
+          m.createIndex("acct", "acct", { unique: false });
+        }
+        if (!db.objectStoreNames.contains(CACHE_DATA)) db.createObjectStore(CACHE_DATA, { keyPath: "k" });
+      };
+      req.onsuccess = function () { cacheDB = req.result; cacheScan(); resolve(cacheDB); };
+      req.onerror = function () { resolve(null); };
     });
-    return out;
-  };
+    return cacheOpening;
+  }
+
+  function cacheKeyOf(appId, day) { return (state.acct || "-") + "|" + (appId || "") + "|" + day; }
+
+  function cacheScan() {
+    if (!cacheDB) return;
+    cacheTotal = 0;
+    var cur = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).openCursor();
+    cur.onsuccess = function (e) {
+      var c = e.target.result;
+      if (c) { cacheTotal += c.value.bytes || 0; c.continue(); }
+    };
+  }
+
+  function cacheGet(appId, day) {
+    return cacheOpen().then(function (db) {
+      if (!db) return null;
+      var k = cacheKeyOf(appId, day);
+      return new Promise(function (resolve) {
+        var tx = db.transaction([CACHE_META, CACHE_DATA], "readonly");
+        var m = tx.objectStore(CACHE_META).get(k);
+        m.onsuccess = function () {
+          if (!m.result) { resolve(null); return; }
+          var d = tx.objectStore(CACHE_DATA).get(k);
+          d.onsuccess = function () {
+            resolve(d.result && d.result.data ? { ts: m.result.ts, data: d.result.data } : null);
+          };
+          d.onerror = function () { resolve(null); };
+        };
+        m.onerror = function () { resolve(null); };
+      });
+    });
+  }
+
+  function cacheSet(appId, day, data) {
+    return cacheOpen().then(function (db) {
+      if (!db) return;
+      var k = cacheKeyOf(appId, day);
+      var json = JSON.stringify(data);
+      var bytes = typeof TextEncoder !== "undefined" ? new TextEncoder().encode(json).length : json.length * 2;
+      return new Promise(function (resolve) {
+        var tx = db.transaction([CACHE_META, CACHE_DATA], "readwrite");
+        var meta = tx.objectStore(CACHE_META);
+        var prev = meta.get(k);
+        prev.onsuccess = function () {
+          meta.put({ k: k, acct: state.acct || "-", appId: appId || "", day: day, ts: Date.now(), bytes: bytes });
+          tx.objectStore(CACHE_DATA).put({ k: k, data: data });
+          cacheTotal += bytes - (prev.result ? prev.result.bytes || 0 : 0);
+          tx.oncomplete = function () { cacheTrim(); refreshCacheMeta(); resolve(); };
+          tx.onerror = function () { resolve(); };
+        };
+        prev.onerror = function () { resolve(); };
+      });
+    });
+  }
+
+  // 超过上限就从最旧的日期删起（按 ts）
+  function cacheTrim() {
+    if (!cacheDB || cacheTotal <= CACHE_CAP) return;
+    var items = [];
+    var cur = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).openCursor();
+    cur.onsuccess = function (e) {
+      var c = e.target.result;
+      if (c) { items.push({ k: c.value.k, ts: c.value.ts || 0, bytes: c.value.bytes || 0 }); c.continue(); return; }
+      items.sort(function (a, b) { return a.ts - b.ts; });
+      var over = cacheTotal - CACHE_CAP, dead = [];
+      for (var i = 0; i < items.length && over > 0; i++) { dead.push(items[i].k); over -= items[i].bytes; }
+      if (!dead.length) return;
+      var tx = cacheDB.transaction([CACHE_META, CACHE_DATA], "readwrite");
+      dead.forEach(function (k) {
+        tx.objectStore(CACHE_META).delete(k);
+        tx.objectStore(CACHE_DATA).delete(k);
+      });
+      tx.oncomplete = function () { cacheScan(); refreshCacheMeta(); };
+    };
+  }
+
+  // 删除账号时连带清掉它的缓存；编辑 cURL 不改 id，所以缓存不会丢
+  function cacheDropAccount(acct) {
+    return cacheOpen().then(function (db) {
+      if (!db || !acct) return;
+      var keys = [];
+      var idx = db.transaction(CACHE_META, "readonly").objectStore(CACHE_META).index("acct");
+      var cur = idx.openCursor(IDBKeyRange.only(acct));
+      cur.onsuccess = function (e) {
+        var c = e.target.result;
+        if (c) { keys.push(c.value.k); c.continue(); return; }
+        if (!keys.length) return;
+        var tx = db.transaction([CACHE_META, CACHE_DATA], "readwrite");
+        keys.forEach(function (k) {
+          tx.objectStore(CACHE_META).delete(k);
+          tx.objectStore(CACHE_DATA).delete(k);
+        });
+        tx.oncomplete = function () { cacheScan(); refreshCacheMeta(); };
+      };
+    });
+  }
+
+  function fmtBytes(b) {
+    if (!b) return "";
+    if (b < 1024) return b + " B";
+    if (b < 1024 * 1024) return (b / 1024).toFixed(0) + " KB";
+    if (b < 1024 * 1024 * 1024) return (b / 1048576).toFixed(b < 10485760 ? 1 : 0) + " MB";
+    return (b / 1073741824).toFixed(2) + " GB";
+  }
+
+  function paintCacheSize() {
+    var el = $("acctSize");
+    if (el) el.textContent = cacheBytes ? fmtBytes(cacheBytes) : "";
+  }
+
+  // 当前账号 + 当前应用包：有缓存的日期集合（日期控件圆点）与占用大小
+  function refreshCacheMeta() {
+    if (!cacheDB) { paintCacheSize(); return; }
+    var acct = state.acct || "-", appId = state.appId || "";
+    var days = {}, bytes = 0;
+    var idx = cacheDB.transaction(CACHE_META, "readonly").objectStore(CACHE_META).index("acct");
+    var cur = idx.openCursor(IDBKeyRange.only(acct));
+    cur.onsuccess = function (e) {
+      var c = e.target.result;
+      if (c) {
+        var v = c.value;
+        if ((v.appId || "") === appId) days[v.day] = 1;
+        bytes += v.bytes || 0;
+        c.continue();
+        return;
+      }
+      state.cacheDays = days;
+      cacheBytes = bytes;
+      paintCacheSize();
+      if (window.__dpSync) __dpSync();
+    };
+  }
+
+  function refreshAcct() {
+    return fetch("/api/auth", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { state.acct = (j && j.active && j.active.id) || "-"; })
+      .catch(function () { if (!state.acct) state.acct = "-"; })
+      .then(cacheOpen)
+      .then(function () { refreshCacheMeta(); });
+  }
+
+  // 日期控件用：返回有缓存的日期集合（当前账号 + 应用包）
+  window.__dpCacheDays = function () { return state.cacheDays || {}; };
+
   function agoLong(ms) {
     var m = Math.floor(ms / 60000);
     if (m < 1) return "刚刚";
@@ -1169,15 +1316,26 @@
     var todayStr0 = new Date().toLocaleDateString("sv-SE");
     var dayKey = state.day || todayStr0;
     $("todayBtn").style.display = dayKey !== todayStr0 ? "" : "none";
-    if (!fresh) {
-      var hit = cacheGet(state.appId, dayKey);
+    if (fresh) { fetchReport(true); return; }
+    // 只要「账号 + 应用包 + 日期」有缓存就直接渲染，不请求
+    var fellBack = false;
+    cacheGet(state.appId, dayKey).then(function (hit) {
       if (hit) {
         applyReport(hit.data, hit.ts);
         $("refresh").disabled = false;
         $("export").disabled = false;
+        refreshCacheMeta();
         return;
       }
-    }
+      fellBack = true;
+      fetchReport(false);
+    }).catch(function () {
+      // 缓存层不可用时退回网络，别让页面卡住
+      if (!fellBack) { fellBack = true; fetchReport(false); }
+    });
+  }
+
+  function fetchReport(force) {
     var btn = $("refreshIcon");
     btn.classList.add("spin");
     $("refresh").disabled = true;
@@ -1194,7 +1352,7 @@
         .then(function (p) { if (state.appId) paintProgress(p, t0); })
         .catch(function () {});
     }, 400);
-    fetch("/api/report?appId=" + encodeURIComponent(state.appId) + (state.day ? "&date=" + state.day : "") + (fresh ? "&fresh=1" : ""), { cache: "no-store" })
+    fetch("/api/report?appId=" + encodeURIComponent(state.appId) + (state.day ? "&date=" + state.day : "") + (force ? "&fresh=1" : ""), { cache: "no-store" })
       .then(needAuth)
       .then(function (r) {
         return r.json().then(function (j) {
@@ -1251,7 +1409,8 @@
     }
     syncUrl();
     hidePick();
-    load(true);
+    refreshCacheMeta();
+    load(false);   // 有缓存就用缓存，不发请求
   });
 
   function reloadForDay() {
@@ -1329,7 +1488,8 @@
   });
 
   function start() {
-    loadApps()
+    refreshAcct()
+      .then(loadApps)
       .then(function () {
         if (state.appId) { hidePick(); load(false); }
         else showPick();

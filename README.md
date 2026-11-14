@@ -14,7 +14,7 @@
 
 ## 下载
 
-到 [Releases](https://github.com/f12998765/ImplBoard/releases) 取最新版本（当前 `0.0.2`）。
+到 [Releases](https://github.com/f12998765/ImplBoard/releases) 取最新版本（当前 `0.0.4`）。
 
 | 平台 | 文件 |
 | --- | --- |
@@ -65,13 +65,13 @@ ImplBoard/
 
 **只有推 tag 才会触发**（推 `main` 不会打包）。一次发版三步：
 
-1. 改 `goapp/mygo.json` 的 `version`（例如 `0.0.3`）；
+1. 改 `goapp/mygo.json` 的 `version`（例如 `0.0.4`）；
 2. 提交并推到 `main`；
 3. 打同名 tag 推上去：
 
 ```bash
-git commit -am "0.0.3"
-git tag 0.0.3
+git commit -am "0.0.4"
+git tag 0.0.4
 git push origin main --tags
 ```
 
@@ -85,6 +85,7 @@ tag 推送后 workflow 会：校验 tag 与 `mygo.json` 的 `version` 一致（�
 - 「更新后新增数据量」= 表单 `updateTime` 之后到当日 23:59 的记录数，用一次 `count` 接口算差值。
 - 并发 16 查询，页面轮询进度接口显示「已查询 N/M」。
 - 前端零框架（原生 JS + 内联样式），三页共用同一套 CSS 变量与组件样式。
+- 本地缓存走 IndexedDB，key = `账号 + 应用包 + 日期`：只要这个 key 有缓存就直接渲染、不发请求（首屏 / 切账号 / 切日期 / 切应用包都一样），只有点「刷新」才重新拉并覆盖当天那份。总占用上限 500MB，超了从最旧的日期开始删，不同日期互不影响；账号按钮旁显示当前账号的缓存占用。删除账号会连带清掉它的缓存，重新粘贴 cURL 编辑账号不影响缓存。
 
 ## 说明
 
