@@ -2,17 +2,9 @@
 .DS_Store
 ._*
 
-# Python
-__pycache__/
-*.py[cod]
-.venv*/
-venv/
-*.egg-info/
-
-# PyInstaller
+# 构建产物
 build/
 dist/
-*.spec.bak
 
 # 凭据（绝不提交）
 *_auth.json

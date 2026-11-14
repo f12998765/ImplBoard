@@ -58,18 +58,26 @@ ImplBoard/
 │   ├── internal/jdy/          # 简道云只读查询（应用列表、表单结构、count）
 │   ├── internal/qf/           # 轻流只读查询（应用树、记录数、最后发布时间）
 │   └── mygo.json              # 应用名 / slug / 版本号 / 打包配置
-└── board/ jdy-today/ qflow-today/   # 早期 Python 实现，仅作参考，不再更新
+└── .github/workflows/release.yml   # 打 tag 后打包全平台并发布
 ```
 
 ## 打包与发布
 
-`.github/workflows/release.yml` 在 `goapp/` 有改动推到 `main` 时（或手动触发）自动执行：
+**只有推 tag 才会触发**（推 `main` 不会打包）。一次发版三步：
 
-1. 读 `goapp/mygo.json` 的 `version`；
-2. 三个 runner 并行打包：macOS（dmg）、Windows（NSIS 安装包 + 便携版）、Linux（tar.gz / deb / rpm）；
-3. 按版本号打 tag，创建或更新同名 Release 并上传全部产物。
+1. 改 `goapp/mygo.json` 的 `version`（例如 `0.0.3`）；
+2. 提交并推到 `main`；
+3. 打同名 tag 推上去：
 
-版本号不变时重复推送只更新资产，改了 `version` 就自动出新 tag 与新 release。发布说明见 `.github/release-notes.md`（`__VERSION__` 会替换成实际版本号）。
+```bash
+git commit -am "0.0.3"
+git tag 0.0.3
+git push origin main --tags
+```
+
+tag 推送后 workflow 会：校验 tag 与 `mygo.json` 的 `version` 一致（不一致直接失败，避免产物名和 release 对不上）→ 三个 runner 并行打包 macOS（dmg）、Windows（NSIS 安装包 + 便携版）、Linux（tar.gz / deb / rpm）→ 用该 tag 创建 Release 并上传全部产物。
+
+同一个 tag 重复跑（手动 `workflow_dispatch`，或在 Actions 页面 Re-run）只会覆盖资产、更新说明，不会移动 tag。发布说明见 `.github/release-notes.md`（`__VERSION__` 会替换成实际版本号）。
 
 ## 实现要点
 

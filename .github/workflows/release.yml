@@ -1,37 +1,55 @@
 name: Release
 
-# goapp/ 有改动推到 main 就打包全平台，并按 goapp/mygo.json 的 version 打 tag、发 Release。
-# 版本号改了（0.0.2 → 0.0.3）就换一个 tag；同名 release 已存在时只更新资产与说明。
+# 只有推 tag 才打包：推 main 不触发。tag 必须与 goapp/mygo.json 的 version 一致，
+# 不一致直接失败（避免产物文件名和 release 对不上）。workflow_dispatch 用于重跑/补发。
 on:
   push:
-    branches: [main]
-    paths:
-      - 'goapp/**'
-      - '.github/workflows/release.yml'
-      - '.github/release-notes.md'
+    tags:
+      - '[0-9]*'
+      - 'v[0-9]*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（留空则用 goapp/mygo.json 里的值）'
+        required: false
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-main
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   version:
-    name: 读取版本号
+    name: 确定版本号
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.read.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - id: read
-        name: 从 goapp/mygo.json 读取 version
+        name: 校验 tag 与 mygo.json 的 version
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref_name }}
+          INPUT: ${{ inputs.version }}
         run: |
-          version=$(python3 -c "import json;print(json.load(open('goapp/mygo.json'))['version'])")
-          echo "版本号：$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          json=$(python3 -c "import json;print(json.load(open('goapp/mygo.json'))['version'])")
+          if [ "$EVENT" = "push" ]; then
+            # tag 允许写成 v0.0.3，内部统一去掉前缀
+            want="${REF#v}"
+            if [ "$want" != "$json" ]; then
+              echo "::error::tag $REF 与 goapp/mygo.json 的 version($json) 不一致，先把 version 改成 $want 再推 tag"
+              exit 1
+            fi
+            echo "版本号：$json（来自 tag $REF）"
+            echo "version=$json" >> "$GITHUB_OUTPUT"
+          else
+            version="${INPUT:-$json}"
+            echo "版本号：$version（手动触发）"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     name: 打包 ${{ matrix.name }}
