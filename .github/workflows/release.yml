@@ -152,6 +152,8 @@ jobs:
 
       - name: 绑定 Go 服务为 aar
         run: |
+          # gomobile bind 要求 x/mobile 在模块依赖图里（tool 指令），在 runner 上加即可
+          go get -tool golang.org/x/mobile/cmd/gobind
           gomobile init
           mkdir -p ../android/app/libs
           gomobile bind \
