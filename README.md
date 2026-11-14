@@ -38,7 +38,20 @@ go tool mygo build -platform darwin/arm64,darwin/amd64,windows/amd64,linux/amd64
 ```
 
 版本号写在 `goapp/mygo.json` 的 `version`，产物文件名都带它，例如 `implboard-0.0.2-arm64.dmg`。
+
 macOS 未签名（`-skip-notarize`）：首次打开需右键 →「打开」，或 `xattr -dr com.apple.quarantine "实施看板.app"`。
+
+### 自动打包与发布
+
+`.github/workflows/release.yml`：`goapp/` 有改动推到 `main`（或手动触发 workflow）时，三个 runner 并行打包，随后按 `goapp/mygo.json` 的 `version` 打 tag 并发布到 Releases；`version` 不变时只更新同名 release 的资产，改了版本号就自动出新 tag。
+
+| 平台 | 产物 |
+| --- | --- |
+| macOS Apple 芯片 / Intel | `implboard-0.0.2-arm64.dmg` / `implboard-0.0.2-amd64.dmg` |
+| Windows x64 / ARM64 | `implboard-setup-0.0.2-amd64.exe` / `implboard-setup-0.0.2-arm64.exe` |
+| Linux x64 / ARM64 | `implboard-0.0.2-linux-<arch>.tar.gz`、`.deb`、`.rpm` |
+
+发布说明见 `.github/release-notes.md`（`__VERSION__` 会替换成实际版本号）。
 
 ## 快速开始（源码运行）
 

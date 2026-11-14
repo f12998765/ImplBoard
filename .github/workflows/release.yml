@@ -1,0 +1,129 @@
+name: Release
+
+# goapp/ 有改动推到 main 就打包全平台，并按 goapp/mygo.json 的 version 打 tag、发 Release。
+# 版本号改了（0.0.2 → 0.0.3）就换一个 tag；同名 release 已存在时只更新资产与说明。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'goapp/**'
+      - '.github/workflows/release.yml'
+      - '.github/release-notes.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: 读取版本号
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        name: 从 goapp/mygo.json 读取 version
+        run: |
+          version=$(python3 -c "import json;print(json.load(open('goapp/mygo.json'))['version'])")
+          echo "版本号：$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 打包 ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-14
+            platform: darwin/arm64,darwin/amd64
+          - name: Windows
+            os: windows-latest
+            platform: windows/amd64,windows/arm64
+          - name: Linux
+            os: ubuntu-latest
+            platform: linux/amd64,linux/arm64
+    defaults:
+      run:
+        working-directory: goapp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: goapp/go.mod
+          cache: true
+          cache-dependency-path: goapp/go.sum
+
+      - name: 下载依赖
+        run: go mod download
+
+      # mygo 无 cgo，任意平台可在任意机器交叉编译；签名与 dmg 需要 macOS，
+      # 所以 macOS 目标跑在 macos runner 上，其余平台各自 runner。
+      - name: 编译打包 ${{ matrix.platform }}
+        run: go tool mygo build -platform ${{ matrix.platform }} -skip-notarize
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            goapp/build/**/*.dmg
+            goapp/build/**/*.exe
+            goapp/build/**/*.tar.gz
+            goapp/build/**/*.deb
+            goapp/build/**/*.rpm
+
+  release:
+    name: 打 tag 并发布
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 产物清单
+        run: ls -lh dist
+
+      - name: 打 tag ${{ needs.version.outputs.version }}
+        env:
+          TAG: ${{ needs.version.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+            echo "tag $TAG 已存在，本次只更新 release 资产与说明"
+          else
+            git tag -a "$TAG" -m "实施看板 $TAG"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: 发布到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.version }}
+        run: |
+          sed "s/__VERSION__/$TAG/g" .github/release-notes.md > /tmp/notes.md
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file /tmp/notes.md
+          else
+            gh release create "$TAG" dist/* \
+              --title "实施看板 $TAG" \
+              --verify-tag \
+              --notes-file /tmp/notes.md
+          fi
