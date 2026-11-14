@@ -386,6 +386,37 @@ func (s *Server) apps() ([]AppItem, error) {
 
 	apps := fetchApps(base, appID)
 	resolveNames(base, apps)
+	active := s.account()
+
+	// 标上「这个包是从哪个账号列出来的」：切包时按它去命中那个账号的缓存。
+	// 每个账号只额外拉一次应用列表（受 appsTTL 约束），拿不到就只在已缓存
+	// 的结果里认领，绝不会给别的账号乱标。
+	s.mu.Lock()
+	owned := make(map[string]string, len(apps))
+	for _, a := range apps {
+		owned[a.AppID] = active
+	}
+	s.mu.Unlock()
+
+	for _, p := range s.otherProfiles(active) {
+		c, err := s.clientFromProfile(p)
+		if err != nil {
+			continue
+		}
+		for _, a := range fetchAppIDsQuiet(c) {
+			s.mu.Lock()
+			if _, taken := owned[a]; !taken {
+				owned[a] = asString(p["id"])
+			}
+			s.mu.Unlock()
+		}
+	}
+
+	for i := range apps {
+		s.mu.Lock()
+		apps[i].Account = owned[apps[i].AppID]
+		s.mu.Unlock()
+	}
 
 	s.mu.Lock()
 	s.appsCache, s.appsAt = apps, unixNow()
@@ -393,10 +424,78 @@ func (s *Server) apps() ([]AppItem, error) {
 	return apps, nil
 }
 
-func (s *Server) clientFor(appID string) (*Client, error) {
+func (s *Server) findProfile(id string) map[string]any {
+	st := loadStore(s.authPath)
+	for _, p := range st.Profiles {
+		if asString(p["id"]) == id {
+			return p
+		}
+	}
+	return nil
+}
+
+// otherProfiles lists stored credentials except the active one.
+func (s *Server) otherProfiles(skipID string) []map[string]any {
+	st := loadStore(s.authPath)
+	out := make([]map[string]any, 0, len(st.Profiles))
+	for _, p := range st.Profiles {
+		if asString(p["id"]) == skipID {
+			continue
+		}
+		if asString(p["cookie"]) == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// clientFromProfile builds a client from a stored credential without
+// disturbing the active profile.
+func (s *Server) clientFromProfile(p map[string]any) (*Client, error) {
+	host := asString(p["host"])
+	if host == "" {
+		return nil, errors.New("凭据缺少 host")
+	}
+	c := newClient(
+		host,
+		orDefault(asString(p["scheme"]), "https"),
+		asString(p["cookie"]),
+		asString(p["csrf"]),
+		map[string]string{
+			"user-agent": asString(p["user_agent"]),
+			"x-jdy-ver":  asString(p["jdy_ver"]),
+		},
+	)
+	c.appID = orDefault(asString(p["app_id"]), DefaultAppID)
+	return c, nil
+}
+
+// fetchAppIDsQuiet returns just the ids a credential can see; a credential
+// that no longer works simply yields nothing.
+func fetchAppIDsQuiet(c *Client) []string {
+	items := fetchApps(c, c.appID)
+	out := make([]string, 0, len(items))
+	for _, a := range items {
+		out = append(out, a.AppID)
+	}
+	return out
+}
+
+func (s *Server) clientFor(appID, acct string) (*Client, error) {
 	base, err := s.ensure()
 	if err != nil {
 		return nil, err
+	}
+	// 指定了应用包所属账号且不是当前账号时，直接用那个账号的凭据，
+	// 这样「切包」命中的是包真正属于的缓存条目，而不是发一次注定被拒的请求。
+	if acct != "" && acct != s.account() {
+		if p := s.findProfile(acct); p != nil {
+			if c, cerr := s.clientFromProfile(p); cerr == nil {
+				c.appID = appID
+				return c, nil
+			}
+		}
 	}
 	if appID == base.appID {
 		return base, nil
@@ -406,15 +505,21 @@ func (s *Server) clientFor(appID string) (*Client, error) {
 	return c, nil
 }
 
-func (s *Server) report(appID string, fresh bool, day string) (*Report, error) {
+// report returns the board for one day. acct is the credential the
+// application package belongs to (empty means the active one): the disk cache
+// is keyed by account+app+day, so passing it makes a package switch hit the
+// entry that package actually wrote instead of refetching.
+func (s *Server) report(appID, acct string, fresh bool, day string) (*Report, error) {
 	if _, err := s.ensure(); err != nil {
 		return nil, err
 	}
 	if day == "" {
 		day = nowInShanghai().Format("2006-01-02")
 	}
+	if acct == "" {
+		acct = s.account()
+	}
 	key := cacheKey{appID: appID, day: day}
-	acct := s.account()
 
 	// 磁盘里有这个「账号+应用包+日期」就直接用，一次外部请求都不发；
 	// 只有 fresh=1（点刷新）才重新采集并覆盖当天那份。
@@ -449,7 +554,7 @@ func (s *Server) report(appID string, fresh bool, day string) (*Report, error) {
 	s.mu.Unlock()
 
 	name := s.appNameFromList(appID)
-	c, err := s.clientFor(appID)
+	c, err := s.clientFor(appID, acct)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +570,7 @@ func (s *Server) report(appID string, fresh bool, day string) (*Report, error) {
 	return rep, nil
 }
 
-func (s *Server) trend(appID string, fresh bool, only []string, endDay string) (*Trend, error) {
+func (s *Server) trend(appID string, acct string, fresh bool, only []string, endDay string) (*Trend, error) {
 	if _, err := s.ensure(); err != nil {
 		return nil, err
 	}
@@ -494,7 +599,7 @@ func (s *Server) trend(appID string, fresh bool, only []string, endDay string) (
 	}
 	s.mu.Unlock()
 
-	c, err := s.clientFor(appID)
+	c, err := s.clientFor(appID, acct)
 	if err != nil {
 		return nil, err
 	}
@@ -564,7 +669,11 @@ func (s *Server) serveGet(w http.ResponseWriter, r *http.Request) {
 	if path == "/api/cache/days" {
 		days := []string{}
 		if s.disk != nil {
-			days = s.disk.Days("jdy", s.account(), r.URL.Query().Get("appId"))
+			acct := r.URL.Query().Get("acct")
+			if acct == "" {
+				acct = s.account()
+			}
+			days = s.disk.Days("jdy", acct, r.URL.Query().Get("appId"))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"days": days})
 		return
@@ -611,6 +720,9 @@ func (s *Server) serveGet(w http.ResponseWriter, r *http.Request) {
 
 	if path == "/api/progress" {
 		key := appID + "|" + orDefault(day, nowInShanghai().Format("2006-01-02"))
+		if acct := q.Get("acct"); acct != "" && acct != s.account() {
+			key += "|" + acct
+		}
 		writeJSON(w, http.StatusOK, s.progress.snapshot(key))
 		return
 	}
@@ -632,7 +744,7 @@ func (s *Server) serveGet(w http.ResponseWriter, r *http.Request) {
 				only = append(only, part)
 			}
 		}
-		t, err := s.trend(appID, fresh, only, day)
+		t, err := s.trend(appID, q.Get("acct"), fresh, only, day)
 		if err != nil {
 			s.writeAPIError(w, err)
 			return
@@ -644,7 +756,8 @@ func (s *Server) serveGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveReport(w http.ResponseWriter, appID, day string, fresh bool, q url.Values) {
-	rep, err := s.report(appID, fresh, day)
+	acct := q.Get("acct")
+	rep, err := s.report(appID, acct, fresh, day)
 	if err != nil {
 		s.writeAPIError(w, err)
 		return
@@ -664,7 +777,7 @@ func (s *Server) serveReport(w http.ResponseWriter, appID, day string, fresh boo
 		case len(ids) == 0:
 			out.Trend = &Trend{Days: []trendDay{}, End: out.Date, GeneratedAt: ""}
 		default:
-			t, terr := s.trend(appID, fresh, ids, out.Date)
+			t, terr := s.trend(appID, acct, fresh, ids, out.Date)
 			if terr != nil {
 				out.Trend = json.RawMessage("null")
 				s.progress.log(key, "趋势统计失败："+terr.Error())

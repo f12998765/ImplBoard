@@ -337,7 +337,7 @@ func TestLiveReport(t *testing.T) {
 	if s.currentClient() == nil {
 		t.Skip("no active credential")
 	}
-	rep, err := s.report(s.defaultApp(), false, "2026-11-13")
+	rep, err := s.report(s.defaultApp(), "", false, "2026-11-13")
 	if err != nil {
 		t.Fatal(err)
 	}
