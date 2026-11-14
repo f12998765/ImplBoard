@@ -1,108 +1,92 @@
 # 实施看板 · ImplBoard
 
-> 简道云 / 轻流 两个平台的表单与数据「当日看板」——本地运行、只读查询、可打包成桌面应用。
+> 简道云 / 轻流 两个平台的表单与数据「当日看板」——本地运行、只读查询，打包成 macOS / Windows / Linux 桌面应用和 Android APK。
 
 ## 它能做什么
 
-- **当日有更新的表单**：逐张列出最后更新时间、以及「更新后新增数据量」（从这次更新到当日 23:59 新收到的记录数）。
+- **当日有更新（发布）的表单**：逐张列出最后更新时间、以及「更新后新增数据量」（从这次更新到当日 23:59 新收到的记录数）。
 - **当日有数据添加的表单**：按新增条数倒序，带总条数与占比条。
 - **5 个指标卡**：应用内表单 / 当日更新（发布）/ 当日有数据添加 / 当日新增记录 / 更新后新增数据量。
 - **3 张图**：近 7 日新增记录、当日更新时段（24 小时面积折线）、更新后新增占当日新增（环形）。
-- **缓存与新鲜度**：报告按「应用包 + 日期」缓存在本地，切日期不再重复请求；1 小时内标「实时中」，超时标「已过期 · N 小时前」。
+- **缓存与新鲜度**：报告按「应用包 + 日期」缓存在本机，切日期不再重复请求；1 小时内标「实时中」，超时标「已过期 · N 小时前」。
+- **手机可用**：窄屏下工具条只留「日期 + 应用包 + ⋯」，其余操作收进菜单；表格自动精简列。
 - **全部请求只读**：只调用查询接口，没有任何发布、保存、删除。
+
+## 下载
+
+到 [Releases](https://github.com/f12998765/ImplBoard/releases) 取最新版本（当前 `0.0.2`）。
+
+| 平台 | 文件 |
+| --- | --- |
+| macOS（Apple 芯片） | `implboard-<版本>-arm64.dmg` |
+| macOS（Intel） | `implboard-<版本>-amd64.dmg` |
+| Windows x64 / ARM64 | `implboard-setup-<版本>-<arch>.exe`（安装包）、`implboard-<版本>-windows-<arch>.exe`（便携版） |
+| Linux x64 / ARM64 | `implboard-<版本>-linux-<arch>.tar.gz`、`.deb`、`.rpm` |
+| Android（arm64 / x86_64） | `implboard-<版本>-android.apk` |
+
+安装注意事项：
+
+- **macOS**：ad-hoc 签名、未公证。首次打开右键 →「打开」，或 `xattr -dr com.apple.quarantine "/Applications/实施看板.app"`。
+- **Windows**：安装包未签名，SmartScreen 提示时选「更多信息 → 仍要运行」。
+- **Linux**：`tar.gz` 解压后运行 `./install.sh` 装到 `~/.local`（可自更新），也可以直接装 `.deb` / `.rpm`。
+- **Android**：APK 未上架应用商店，需要允许「安装未知来源应用」。
+
+## 首次使用
+
+1. 浏览器登录对应平台，复制一份请求里的凭证：
+   - 简道云：Cookie 与 `x-csrf-token`
+   - 轻流：`token` 与 `wsid`
+2. 打开应用 →「账号」粘贴保存。凭证只存在本机，`~/Library/Application Support/ImplBoard/`（Windows 为 `%APPDATA%\ImplBoard`）。
+3. 选日期与应用包（简道云）后点「刷新」；数据按「应用包 + 日期」缓存在 localStorage，再进同一个日期不会重复请求。
+
+## 本地开发
+
+页面是三个单文件 HTML（主页 / 简道云 / 轻流），Go 侧起三个本地端口把它们和查询接口一起serve出去，桌面端用 [mygo](https://github.com/egoist/mygo) 开原生窗口，Android 端用 WebView + gomobile 绑定同一份 Go 服务。
+
+```bash
+cd goapp
+go run .                                  # 直接开窗口
+go tool mygo build -skip-notarize         # 打本机平台的包，产物在 goapp/build/
+```
+
+版本号写在 `goapp/mygo.json` 的 `version`，产物文件名都带它。
+
+Android 包需要 Android SDK / NDK 与 Gradle，只在 CI 里构建（见下）。
 
 ## 目录结构
 
 ```
 ImplBoard/
-├── board/                     # 桌面外壳（一个主页 + 两个看板）
-│   ├── app.py                 # 起三个本地 HTTP 服务，用 pywebview 开窗口
-│   ├── home.html              # 主页：选平台进入
-│   ├── icons/                 # 两个平台图标
-│   ├── ImplBoard.spec         # PyInstaller 打包配置（macOS）
-│   ├── build-windows.bat      # Windows 一键构建
-│   └── workflow-build-windows.yml  # GitHub Actions 构建 Windows 包
-├── goapp/                     # Go 原生版（mygo 打包：macOS / Windows / Linux）
-├── jdy-today/                 # 简道云看板（index.html + 采集服务）
-└── qflow-today/               # 轻流看板（index.html + 采集服务）
+├── goapp/                     # Go 实现（桌面 + 移动共用）
+│   ├── assets/                # home.html / jdy.html / qf.html 与图标
+│   ├── internal/boot/         # 起三个本地端口、内嵌页面、汇总主页
+│   ├── internal/jdy/          # 简道云只读查询（应用列表、表单结构、count）
+│   ├── internal/qf/           # 轻流只读查询（应用树、记录数、最后发布时间）
+│   ├── mobile/                # gomobile 绑定入口（供 Android 调用）
+│   └── mygo.json              # 应用名 / slug / 版本号 / 打包配置
+├── android/                   # Android 壳工程（WebView + 内嵌 Go 服务）
+└── board/ jdy-today/ qflow-today/   # 早期 Python 实现，仅作参考，不再更新
 ```
 
-## Go 原生版
+## 打包与发布
 
-`goapp/` 是同一套页面的 Go 重写：三个本地端口 + 内嵌 `assets/`，由 [mygo](https://github.com/egoist/mygo) 打包成原生窗口应用——macOS 上是一个 9.6 MB 的 `.app`，不依赖 Python 与 pywebview。
+`.github/workflows/release.yml` 在 `goapp/`、`android/` 有改动推到 `main` 时（或手动触发）自动执行：
 
-```bash
-cd goapp
-go tool mygo build -skip-notarize          # 只打本机平台，产物在 goapp/build/<平台>/
-go tool mygo build -platform darwin/arm64,darwin/amd64,windows/amd64,linux/amd64 -skip-notarize
-```
+1. 读 `goapp/mygo.json` 的 `version`；
+2. 四个 runner 并行打包：macOS（dmg）、Windows（NSIS 安装包 + 便携版）、Linux（tar.gz / deb / rpm）、Android（Gradle 出 APK）；
+3. 按版本号打 tag，创建或更新同名 Release 并上传全部产物。
 
-版本号写在 `goapp/mygo.json` 的 `version`，产物文件名都带它，例如 `implboard-0.0.2-arm64.dmg`。
-
-macOS 未签名（`-skip-notarize`）：首次打开需右键 →「打开」，或 `xattr -dr com.apple.quarantine "实施看板.app"`。
-
-### 自动打包与发布
-
-`.github/workflows/release.yml`：`goapp/` 有改动推到 `main`（或手动触发 workflow）时，三个 runner 并行打包，随后按 `goapp/mygo.json` 的 `version` 打 tag 并发布到 Releases；`version` 不变时只更新同名 release 的资产，改了版本号就自动出新 tag。
-
-| 平台 | 产物 |
-| --- | --- |
-| macOS Apple 芯片 / Intel | `implboard-0.0.2-arm64.dmg` / `implboard-0.0.2-amd64.dmg` |
-| Windows x64 / ARM64 | `implboard-setup-0.0.2-amd64.exe` / `implboard-setup-0.0.2-arm64.exe` |
-| Linux x64 / ARM64 | `implboard-0.0.2-linux-<arch>.tar.gz`、`.deb`、`.rpm` |
-
-发布说明见 `.github/release-notes.md`（`__VERSION__` 会替换成实际版本号）。
-
-## 快速开始（源码运行）
-
-两个看板各自是一个自带 HTTP 服务的单文件页面，前端只认 `/api/report`、`/api/apps` 这类接口。
-
-```bash
-# 轻流（默认 8899）
-QF_AUTH=./qflow-today/qf_auth.json python3 qflow-today/qf_server.py --port 8899
-
-# 简道云（默认 8898）
-JDY_AUTH=./jdy-today/jdy_auth.json python3 jdy-today/jdy_today_server.py --port 8898
-```
-
-浏览器打开 `http://127.0.0.1:8898/`（简道云）或 `http://127.0.0.1:8899/`（轻流）。
-
-### 凭据
-
-- 浏览器里登录对应平台，复制一份请求的 Cookie / token，存成 JSON：
-  - 简道云：`{"cookie": "...", "csrf": "..."}`
-  - 轻流：`{"token": "...", "wsid": "..."}`
-- 也可以用环境变量 `JDY_AUTH` / `QF_AUTH` 指到任意路径的 JSON。
-- 默认读取 `~/Library/Application Support/ImplBoard/`（旧版目录 `DataBoard` 仍兼容）。
-
-> 凭据只存在本机，`.gitignore` 已排除 `*_auth.json`，不要提交。
-
-## 打包成桌面应用
-
-**macOS**
-
-```bash
-cd board
-pyinstaller ImplBoard.spec --noconfirm --distpath dist --workpath build
-mv dist/ImplBoard.app "dist/实施看板.app"
-/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 实施看板" "dist/实施看板.app/Contents/Info.plist"
-codesign --force --deep --sign - "dist/实施看板.app"
-```
-
-**Windows**：在 `board/` 下双击 `build-windows.bat`，产物是 `dist\ImplBoard\ImplBoard.exe`（整个文件夹一起拷贝）。
-也可以直接用仓库里的 GitHub Actions 工作流产出 Windows 包。
+版本号不变时重复推送只更新资产，改了 `version` 就自动出新 tag 与新 release。发布说明见 `.github/release-notes.md`（`__VERSION__` 会替换成实际版本号）。
 
 ## 实现要点
 
-- 采集端只用 Python 标准库（`urllib` + `ThreadPoolExecutor`），无第三方依赖；桌面壳用 `pywebview`。
+- 采集端只用 Go 标准库（`net/http` + `encoding/json`），无 cgo、无第三方运行时依赖。
 - 「更新后新增数据量」= 表单 `updateTime` 之后到当日 23:59 的记录数，用一次 `count` 接口算差值。
-- 前端零框架（原生 JS + 内联样式），两页共用同一套 CSS，方便保持一致。
-
-## 截图
-
-截图含真实表单名与记录条数，未放入公开仓库，需要时单独提供。
+- 并发 16 查询，页面轮询进度接口显示「已查询 N/M」。
+- 前端零框架（原生 JS + 内联样式），三页共用同一套 CSS 变量与组件样式。
 
 ## 说明
 
 - 两个平台的内部接口并非公开 API，字段与口径可能变化；本项目只做只读聚合，不保证接口长期稳定。
+- 截图含真实表单名与记录条数，未放入公开仓库，需要时单独提供。
 - 仅供内部使用，请遵守所在平台的使用条款。

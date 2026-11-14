@@ -1,0 +1,8 @@
+# CI 生成
+app/libs/*.aar
+out/
+build/
+.gradle/
+local.properties
+*.iml
+.idea/

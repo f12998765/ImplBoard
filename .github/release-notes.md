@@ -10,6 +10,7 @@
 | Windows ARM64 | `implboard-setup-__VERSION__-arm64.exe`（安装包）、`implboard-__VERSION__-windows-arm64.exe`（便携版） |
 | Linux x64 | `implboard-__VERSION__-linux-amd64.tar.gz`、`implboard___VERSION___amd64.deb`、`implboard-__VERSION__-1.x86_64.rpm` |
 | Linux ARM64 | `implboard-__VERSION__-linux-arm64.tar.gz`、`implboard___VERSION___arm64.deb`、`implboard-__VERSION__-1.aarch64.rpm` |
+| Android（arm64 / x86_64） | `implboard-__VERSION__-android.apk` |
 
 ## 安装
 
@@ -17,6 +18,7 @@
   `xattr -dr com.apple.quarantine "/Applications/实施看板.app"`。
 - **Windows**：安装包未签名，SmartScreen 提示时选「更多信息 → 仍要运行」。
 - **Linux**：`.tar.gz` 解压后运行 `./install.sh`，装到 `~/.local` 并可自更新；也可以直接装 `.deb` / `.rpm`。
+- **Android**：APK 未上架应用商店，需要允许「安装未知来源应用」；内置同一个 Go 服务，无需联网配置。
 
 ## 首次使用
 
