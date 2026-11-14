@@ -1,6 +1,6 @@
 # 实施看板 · ImplBoard
 
-> 简道云 / 轻流 两个平台的表单与数据「当日看板」——本地运行、只读查询，打包成 macOS / Windows / Linux 桌面应用和 Android APK。
+> 简道云 / 轻流 两个平台的表单与数据「当日看板」——本地运行、只读查询，打包成 macOS / Windows / Linux 桌面应用。
 
 ## 它能做什么
 
@@ -22,14 +22,12 @@
 | macOS（Intel） | `implboard-<版本>-amd64.dmg` |
 | Windows x64 / ARM64 | `implboard-setup-<版本>-<arch>.exe`（安装包）、`implboard-<版本>-windows-<arch>.exe`（便携版） |
 | Linux x64 / ARM64 | `implboard-<版本>-linux-<arch>.tar.gz`、`.deb`、`.rpm` |
-| Android（arm64 / x86_64） | `implboard-<版本>-android.apk` |
 
 安装注意事项：
 
 - **macOS**：ad-hoc 签名、未公证。首次打开右键 →「打开」，或 `xattr -dr com.apple.quarantine "/Applications/实施看板.app"`。
 - **Windows**：安装包未签名，SmartScreen 提示时选「更多信息 → 仍要运行」。
 - **Linux**：`tar.gz` 解压后运行 `./install.sh` 装到 `~/.local`（可自更新），也可以直接装 `.deb` / `.rpm`。
-- **Android**：APK 未上架应用商店，需要允许「安装未知来源应用」。
 
 ## 首次使用
 
@@ -41,7 +39,7 @@
 
 ## 本地开发
 
-页面是三个单文件 HTML（主页 / 简道云 / 轻流），Go 侧起三个本地端口把它们和查询接口一起serve出去，桌面端用 [mygo](https://github.com/egoist/mygo) 开原生窗口，Android 端用 WebView + gomobile 绑定同一份 Go 服务。
+页面是三个单文件 HTML（主页 / 简道云 / 轻流），Go 侧起三个本地端口把它们和查询接口一起 serve 出去，[mygo](https://github.com/egoist/mygo) 再开一个原生窗口指向它。
 
 ```bash
 cd goapp
@@ -51,29 +49,24 @@ go tool mygo build -skip-notarize         # 打本机平台的包，产物在 go
 
 版本号写在 `goapp/mygo.json` 的 `version`，产物文件名都带它。
 
-Android 包需要 Android SDK / NDK 与 Gradle，只在 CI 里构建（见下）。
-
 ## 目录结构
 
 ```
 ImplBoard/
-├── goapp/                     # Go 实现（桌面 + 移动共用）
+├── goapp/                     # Go 实现
 │   ├── assets/                # home.html / jdy.html / qf.html 与图标
-│   ├── internal/boot/         # 起三个本地端口、内嵌页面、汇总主页
 │   ├── internal/jdy/          # 简道云只读查询（应用列表、表单结构、count）
 │   ├── internal/qf/           # 轻流只读查询（应用树、记录数、最后发布时间）
-│   ├── mobile/                # gomobile 绑定入口（供 Android 调用）
 │   └── mygo.json              # 应用名 / slug / 版本号 / 打包配置
-├── android/                   # Android 壳工程（WebView + 内嵌 Go 服务）
 └── board/ jdy-today/ qflow-today/   # 早期 Python 实现，仅作参考，不再更新
 ```
 
 ## 打包与发布
 
-`.github/workflows/release.yml` 在 `goapp/`、`android/` 有改动推到 `main` 时（或手动触发）自动执行：
+`.github/workflows/release.yml` 在 `goapp/` 有改动推到 `main` 时（或手动触发）自动执行：
 
 1. 读 `goapp/mygo.json` 的 `version`；
-2. 四个 runner 并行打包：macOS（dmg）、Windows（NSIS 安装包 + 便携版）、Linux（tar.gz / deb / rpm）、Android（Gradle 出 APK）；
+2. 三个 runner 并行打包：macOS（dmg）、Windows（NSIS 安装包 + 便携版）、Linux（tar.gz / deb / rpm）；
 3. 按版本号打 tag，创建或更新同名 Release 并上传全部产物。
 
 版本号不变时重复推送只更新资产，改了 `version` 就自动出新 tag 与新 release。发布说明见 `.github/release-notes.md`（`__VERSION__` 会替换成实际版本号）。
