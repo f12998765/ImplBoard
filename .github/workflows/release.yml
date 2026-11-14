@@ -70,6 +70,16 @@ jobs:
       - name: 编译打包 ${{ matrix.platform }}
         run: go tool mygo build -platform ${{ matrix.platform }} -skip-notarize
 
+      # mygo 用应用名给 Windows 可执行文件命名（实施看板.exe），两个架构会同名，
+      # 这里改成 ASCII 的便携版名字，安装包仍是 implboard-setup-<version>-<arch>.exe
+      - name: 便携版改名（Windows）
+        if: matrix.name == 'Windows'
+        shell: bash
+        run: |
+          for arch in amd64 arm64; do
+            mv "build/windows-$arch/实施看板.exe" "build/windows-$arch/implboard-${{ needs.version.outputs.version }}-windows-$arch.exe"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
@@ -97,7 +107,7 @@ jobs:
           merge-multiple: true
 
       - name: 产物清单
-        run: ls -lh dist
+        run: find dist -type f -exec ls -lh {} +
 
       - name: 打 tag ${{ needs.version.outputs.version }}
         env:
@@ -118,11 +128,14 @@ jobs:
           TAG: ${{ needs.version.outputs.version }}
         run: |
           sed "s/__VERSION__/$TAG/g" .github/release-notes.md > /tmp/notes.md
+          # artifact 保留了 build/<平台>/ 子目录，摊平成文件列表
+          mapfile -t files < <(find dist -type f | sort)
+          printf '%s\n' "${files[@]}"
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+            gh release upload "$TAG" "${files[@]}" --clobber
             gh release edit "$TAG" --notes-file /tmp/notes.md
           else
-            gh release create "$TAG" dist/* \
+            gh release create "$TAG" "${files[@]}" \
               --title "实施看板 $TAG" \
               --verify-tag \
               --notes-file /tmp/notes.md

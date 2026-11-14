@@ -6,8 +6,8 @@
 | --- | --- |
 | macOS（Apple 芯片 M1/M2/M3…） | `implboard-__VERSION__-arm64.dmg` |
 | macOS（Intel） | `implboard-__VERSION__-amd64.dmg` |
-| Windows x64 | `implboard-setup-__VERSION__-amd64.exe` |
-| Windows ARM64 | `implboard-setup-__VERSION__-arm64.exe` |
+| Windows x64 | `implboard-setup-__VERSION__-amd64.exe`（安装包）、`implboard-__VERSION__-windows-amd64.exe`（便携版） |
+| Windows ARM64 | `implboard-setup-__VERSION__-arm64.exe`（安装包）、`implboard-__VERSION__-windows-arm64.exe`（便携版） |
 | Linux x64 | `implboard-__VERSION__-linux-amd64.tar.gz`、`implboard___VERSION___amd64.deb`、`implboard-__VERSION__-1.x86_64.rpm` |
 | Linux ARM64 | `implboard-__VERSION__-linux-arm64.tar.gz`、`implboard___VERSION___arm64.deb`、`implboard-__VERSION__-1.aarch64.rpm` |
 
