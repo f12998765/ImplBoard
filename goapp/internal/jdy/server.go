@@ -58,6 +58,7 @@ type Server struct {
 }
 
 type cacheKey struct {
+	acct  string
 	appID string
 	day   string
 }
@@ -326,11 +327,14 @@ func (s *Server) loadDiskReport(acct, appID, day string) *Report {
 	if err := json.Unmarshal(e.Data, &rep); err != nil {
 		return nil
 	}
+	// trend 字段存的是完整图表对象，反序列化后是 map/[]any，前端照常渲染。
 	return &rep
 }
 
+// saveDiskReport writes the whole payload, trend included, so a later hit
+// needs no upstream call for the chart either.
 func (s *Server) saveDiskReport(acct, appID string, rep *Report) {
-	if s.disk == nil || rep == nil {
+	if s.disk == nil || rep == nil || rep.Date == "" {
 		return
 	}
 	body, err := json.Marshal(rep)
@@ -386,37 +390,6 @@ func (s *Server) apps() ([]AppItem, error) {
 
 	apps := fetchApps(base, appID)
 	resolveNames(base, apps)
-	active := s.account()
-
-	// 标上「这个包是从哪个账号列出来的」：切包时按它去命中那个账号的缓存。
-	// 每个账号只额外拉一次应用列表（受 appsTTL 约束），拿不到就只在已缓存
-	// 的结果里认领，绝不会给别的账号乱标。
-	s.mu.Lock()
-	owned := make(map[string]string, len(apps))
-	for _, a := range apps {
-		owned[a.AppID] = active
-	}
-	s.mu.Unlock()
-
-	for _, p := range s.otherProfiles(active) {
-		c, err := s.clientFromProfile(p)
-		if err != nil {
-			continue
-		}
-		for _, a := range fetchAppIDsQuiet(c) {
-			s.mu.Lock()
-			if _, taken := owned[a]; !taken {
-				owned[a] = asString(p["id"])
-			}
-			s.mu.Unlock()
-		}
-	}
-
-	for i := range apps {
-		s.mu.Lock()
-		apps[i].Account = owned[apps[i].AppID]
-		s.mu.Unlock()
-	}
 
 	s.mu.Lock()
 	s.appsCache, s.appsAt = apps, unixNow()
@@ -424,78 +397,19 @@ func (s *Server) apps() ([]AppItem, error) {
 	return apps, nil
 }
 
-func (s *Server) findProfile(id string) map[string]any {
-	st := loadStore(s.authPath)
-	for _, p := range st.Profiles {
-		if asString(p["id"]) == id {
-			return p
-		}
-	}
-	return nil
-}
 
 // otherProfiles lists stored credentials except the active one.
-func (s *Server) otherProfiles(skipID string) []map[string]any {
-	st := loadStore(s.authPath)
-	out := make([]map[string]any, 0, len(st.Profiles))
-	for _, p := range st.Profiles {
-		if asString(p["id"]) == skipID {
-			continue
-		}
-		if asString(p["cookie"]) == "" {
-			continue
-		}
-		out = append(out, p)
-	}
-	return out
-}
 
 // clientFromProfile builds a client from a stored credential without
 // disturbing the active profile.
-func (s *Server) clientFromProfile(p map[string]any) (*Client, error) {
-	host := asString(p["host"])
-	if host == "" {
-		return nil, errors.New("凭据缺少 host")
-	}
-	c := newClient(
-		host,
-		orDefault(asString(p["scheme"]), "https"),
-		asString(p["cookie"]),
-		asString(p["csrf"]),
-		map[string]string{
-			"user-agent": asString(p["user_agent"]),
-			"x-jdy-ver":  asString(p["jdy_ver"]),
-		},
-	)
-	c.appID = orDefault(asString(p["app_id"]), DefaultAppID)
-	return c, nil
-}
 
 // fetchAppIDsQuiet returns just the ids a credential can see; a credential
 // that no longer works simply yields nothing.
-func fetchAppIDsQuiet(c *Client) []string {
-	items := fetchApps(c, c.appID)
-	out := make([]string, 0, len(items))
-	for _, a := range items {
-		out = append(out, a.AppID)
-	}
-	return out
-}
 
-func (s *Server) clientFor(appID, acct string) (*Client, error) {
+func (s *Server) clientFor(appID string) (*Client, error) {
 	base, err := s.ensure()
 	if err != nil {
 		return nil, err
-	}
-	// 指定了应用包所属账号且不是当前账号时，直接用那个账号的凭据，
-	// 这样「切包」命中的是包真正属于的缓存条目，而不是发一次注定被拒的请求。
-	if acct != "" && acct != s.account() {
-		if p := s.findProfile(acct); p != nil {
-			if c, cerr := s.clientFromProfile(p); cerr == nil {
-				c.appID = appID
-				return c, nil
-			}
-		}
 	}
 	if appID == base.appID {
 		return base, nil
@@ -519,7 +433,7 @@ func (s *Server) report(appID, acct string, fresh bool, day string) (*Report, er
 	if acct == "" {
 		acct = s.account()
 	}
-	key := cacheKey{appID: appID, day: day}
+	key := cacheKey{acct: acct, appID: appID, day: day}
 
 	// 磁盘里有这个「账号+应用包+日期」就直接用，一次外部请求都不发；
 	// 只有 fresh=1（点刷新）才重新采集并覆盖当天那份。
@@ -541,7 +455,7 @@ func (s *Server) report(appID, acct string, fresh bool, day string) (*Report, er
 	s.mu.Unlock()
 
 	// One build per app+day, so concurrent refreshes do not trample progress.
-	lk := s.keylock("report|" + appID + "|" + day)
+	lk := s.keylock("report|" + acct + "|" + appID + "|" + day)
 	lk.Lock()
 	defer lk.Unlock()
 
@@ -554,7 +468,7 @@ func (s *Server) report(appID, acct string, fresh bool, day string) (*Report, er
 	s.mu.Unlock()
 
 	name := s.appNameFromList(appID)
-	c, err := s.clientFor(appID, acct)
+	c, err := s.clientFor(appID)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +491,7 @@ func (s *Server) trend(appID string, acct string, fresh bool, only []string, end
 	if endDay == "" {
 		endDay = nowInShanghai().Format("2006-01-02")
 	}
-	key := cacheKey{appID: appID, day: endDay}
+	key := cacheKey{acct: acct, appID: appID, day: endDay}
 
 	s.mu.Lock()
 	if hit, ok := s.trends[key]; ok && !fresh && unixNow()-hit.at < trendTTL.Seconds() {
@@ -587,7 +501,7 @@ func (s *Server) trend(appID string, acct string, fresh bool, only []string, end
 	}
 	s.mu.Unlock()
 
-	lk := s.keylock("trend|" + appID + "|" + endDay)
+	lk := s.keylock("trend|" + acct + "|" + appID + "|" + endDay)
 	lk.Lock()
 	defer lk.Unlock()
 
@@ -599,7 +513,7 @@ func (s *Server) trend(appID string, acct string, fresh bool, only []string, end
 	}
 	s.mu.Unlock()
 
-	c, err := s.clientFor(appID, acct)
+	c, err := s.clientFor(appID)
 	if err != nil {
 		return nil, err
 	}
@@ -757,34 +671,20 @@ func (s *Server) serveGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveReport(w http.ResponseWriter, appID, day string, fresh bool, q url.Values) {
 	acct := q.Get("acct")
+	// 报告和图表是一个整体：磁盘文件里带 trend，命中就整块返回，
+	// 不需要再为图表单独请求上游。
 	rep, err := s.report(appID, acct, fresh, day)
 	if err != nil {
 		s.writeAPIError(w, err)
 		return
 	}
-	// Copy before attaching the trend: the cache keeps the bare report.
 	out := *rep
 	key := appID + "|" + out.Date
 
-	if q.Get("trend") != "0" {
-		ids := make([]string, 0, len(out.Forms))
-		for _, f := range out.Forms {
-			if f.Total > 0 {
-				ids = append(ids, f.EntryID)
-			}
-		}
-		switch {
-		case len(ids) == 0:
-			out.Trend = &Trend{Days: []trendDay{}, End: out.Date, GeneratedAt: ""}
-		default:
-			t, terr := s.trend(appID, acct, fresh, ids, out.Date)
-			if terr != nil {
-				out.Trend = json.RawMessage("null")
-				s.progress.log(key, "趋势统计失败："+terr.Error())
-			} else {
-				out.Trend = t
-			}
-		}
+	if q.Get("trend") != "0" && out.Trend == nil {
+		out.Trend = s.fillTrend(appID, acct, fresh, &out, key)
+		// 只在刚采集出来（或补上了缺的图表）时回写，命中缓存不再重复落盘。
+		s.saveDiskReport(acct, appID, &out)
 	}
 
 	s.progress.set(key, map[string]any{
@@ -792,6 +692,27 @@ func (s *Server) serveReport(w http.ResponseWriter, appID, day string, fresh boo
 	})
 	s.progress.log(key, fmt.Sprintf("完成：用时 %.1fs", float64(out.DurationMs)/1000))
 	writeJSON(w, http.StatusOK, &out)
+}
+
+// fillTrend builds the 7-day chart for a report. A failed trend query is
+// cached as an explicit null on purpose (方案 B): the board then shows
+// "统计失败" and stops retrying instead of hitting the upstream again.
+func (s *Server) fillTrend(appID, acct string, fresh bool, rep *Report, key string) any {
+	ids := make([]string, 0, len(rep.Forms))
+	for _, f := range rep.Forms {
+		if f.Total > 0 {
+			ids = append(ids, f.EntryID)
+		}
+	}
+	if len(ids) == 0 {
+		return &Trend{Days: []trendDay{}, End: rep.Date, GeneratedAt: ""}
+	}
+	t, err := s.trend(appID, acct, fresh, ids, rep.Date)
+	if err != nil {
+		s.progress.log(key, "趋势统计失败："+err.Error())
+		return json.RawMessage("null")
+	}
+	return t
 }
 
 func (s *Server) writeAPIError(w http.ResponseWriter, err error) {

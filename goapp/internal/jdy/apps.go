@@ -19,10 +19,6 @@ var (
 type AppItem struct {
 	AppID string `json:"appId"`
 	Name  string `json:"name"`
-	// Account is the credential this application was listed under. Several
-	// accounts commonly see different packages, so the cache key needs it in
-	// order to hit the entry the package actually belongs to.
-	Account string `json:"account,omitempty"`
 }
 
 func validAppID(id string) bool {

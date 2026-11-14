@@ -1015,10 +1015,14 @@
           hideAuth();
           state.data = null; state.trend = null; state.appId = ""; state.day = "";
           state.apps = [];
+          cacheDays = {};
           $("appSelect").value = "";
+          $("appSelect").innerHTML = '<option value="">选择应用包…</option>';
           $("appLabel").textContent = "—";
           $("dateText").textContent = "—";
           $("genAt").textContent = "—";
+          // 清掉上一个账号留下的应用包和地址栏参数，别让新账号顺着旧 appId 发请求
+          try { localStorage.removeItem(LAST_KEY); } catch (e) {}
           history.replaceState(null, "", location.pathname);
           start();
         })
@@ -1091,9 +1095,7 @@
         if (state.day) { $("day").value = state.day; if (window.__dpSync) __dpSync(); }
         var sel = $("appSelect");
         sel.innerHTML = '<option value="">选择应用包…</option>' + state.apps.map(function (a) {
-          return '<option value="' + esc(a.appId) + '" data-acct="' + esc(a.account || "") +
-            '" title="' + esc(a.appId) + (a.account ? " · 账号 " + a.account : "") + '">' +
-            esc(appLabelOf(a)) + "</option>";
+          return '<option value="' + esc(a.appId) + '" title="' + esc(a.appId) + '">' + esc(appLabelOf(a)) + "</option>";
         }).join("");
         sel.value = state.appId && state.apps.some(function (a) { return a.appId === state.appId; }) ? state.appId : "";
         if (!sel.value) state.appId = "";
@@ -1142,7 +1144,7 @@
   // 日期控件圆点：问后端哪些日期已有缓存（当前账号 + 应用包）
   function refreshCacheDays() {
     if (!state.appId) { cacheDays = {}; return Promise.resolve(); }
-    var acctQ = acctOfApp(state.appId);
+    var acctQ = acctNow();
     return fetch("/api/cache/days?appId=" + encodeURIComponent(state.appId) + (acctQ ? "&acct=" + encodeURIComponent(acctQ) : ""), { cache: "no-store" })
       .then(function (r) { return r.json(); })
       .then(function (j) {
@@ -1156,13 +1158,9 @@
 
   window.__dpCacheDays = function () { return cacheDays; };
 
-  // 当前应用包属于哪个账号：请求时带上它，切包才能命中那个账号的缓存
-  function acctOfApp(appId) {
-    for (var i = 0; i < state.apps.length; i++) {
-      if (state.apps[i].appId === appId) return state.apps[i].account || "";
-    }
-    return "";
-  }
+  // 请求里带的账号：缓存 key = 账号 + 应用包 + 日期，
+  // 切账号后列表和缓存都跟着换，切包才能命中。
+  function acctNow() { return cacheAcct && cacheAcct !== "-" ? cacheAcct : ""; }
 
   function agoLong(ms) {
     var m = Math.floor(ms / 60000);
@@ -1227,7 +1225,7 @@
         .then(function (p) { if (state.appId) paintProgress(p, t0); })
         .catch(function () {});
     }, 400);
-    var acctQ = acctOfApp(state.appId);
+    var acctQ = acctNow();
     fetch("/api/report?appId=" + encodeURIComponent(state.appId) + (state.day ? "&date=" + state.day : "") +
         (force ? "&fresh=1" : "") + (acctQ ? "&acct=" + encodeURIComponent(acctQ) : ""), { cache: "no-store" })
       .then(needAuth)

@@ -49,6 +49,8 @@ type groupRow struct {
 
 // Report is the /api/report payload. Trend is filled by the handler: nil omits
 // the key (trend=0), a raw null keeps it as null when the trend query failed.
+// The whole value — trend included — is what gets written to the disk cache,
+// so a cache hit needs no extra upstream call for the chart.
 type Report struct {
 	GeneratedAt   string    `json:"generatedAt"`
 	Date          string    `json:"date"`
