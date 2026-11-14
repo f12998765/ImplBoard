@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv*/
+venv/
+*.egg-info/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# 凭据（绝不提交）
+*_auth.json
+auth.json
+credentials*.json
+
+# 日志与临时产物
+*.log
+*.zip
+.picache/
+.pytest_cache/

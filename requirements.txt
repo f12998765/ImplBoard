@@ -1,0 +1,6 @@
+# 运行时：采集端只用标准库，桌面壳需要 pywebview
+pywebview>=5.0
+certifi
+
+# 打包（可选）
+pyinstaller>=6.0
