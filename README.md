@@ -73,7 +73,7 @@ codesign --force --deep --sign - "dist/实施看板.app"
 
 ## 截图
 
-截图里有真实表单名与条数，未放进公开仓库（本地保存在 `ImplBoard-preview/`）。
+截图含真实表单名与记录条数，未放入公开仓库，需要时单独提供。
 
 ## 说明
 
