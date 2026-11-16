@@ -2,7 +2,7 @@
   "name": "实施看板",
   "slug": "implboard",
   "identifier": "com.xizero.implboard",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "copyright": "© 2026 ImplBoard",
   "main": ".",
   "out": "build"

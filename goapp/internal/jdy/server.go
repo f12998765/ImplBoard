@@ -236,6 +236,42 @@ func (s *Server) setAuth(cookie, csrf, host, scheme, appID string, extra map[str
 	return c, nil
 }
 
+// updateProfileCred rewrites an existing credential in place. It validates the
+// new cURL first (so a typo does not silently break the account), keeps the
+// original id — and therefore its disk cache — and re-activates it.
+func (s *Server) updateProfileCred(id, cookie, csrf, host, scheme, appID string, extra map[string]string) error {
+	c := newClient(host, scheme, cookie, csrf, extra)
+	c.appID = appID
+	if _, err := c.EntryMap(); err != nil {
+		return err
+	}
+
+	st := loadStore(s.authPath)
+	prof := findProfile(st.Profiles, id)
+	if prof == nil {
+		return errors.New("没有这个凭据")
+	}
+	if name := strings.TrimSpace(asString(prof["name"])); name == "" {
+		prof["name"] = host
+	}
+	prof["host"] = host
+	prof["scheme"] = scheme
+	prof["app_id"] = appID
+	prof["cookie"] = cookie
+	prof["csrf"] = csrf
+	prof["user_agent"] = extra["user-agent"]
+	prof["jdy_ver"] = extra["x-jdy-ver"]
+	prof["updatedAt"] = time.Now().Unix()
+	st.Active = id
+	if err := saveStore(s.authPath, st); err != nil {
+		return err
+	}
+
+	s.activate(c, appID)
+	s.setActiveID(id)
+	return nil
+}
+
 // switchProfile verifies and activates a stored profile.
 func (s *Server) switchProfile(id string) (Profile, error) {
 	st := loadStore(s.authPath)
@@ -254,9 +290,8 @@ func (s *Server) switchProfile(id string) (Profile, error) {
 		},
 	)
 	c.appID = orDefault(asString(prof["app_id"]), DefaultAppID)
-	if _, err := c.EntryMap(); err != nil {
-		return Profile{}, err
-	}
+	// 切凭据不校验有效性：凭据过期时也要能切过去看已经落盘的缓存数据。
+	// 只有真正要访问简道云时才由 API 返回 401/409，页面会提示重新粘贴 cURL。
 
 	st.Active = id
 	_ = saveStore(s.authPath, st)
@@ -831,6 +866,18 @@ func (s *Server) serveAuth(w http.ResponseWriter, raw []byte) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": "appId 不合法，请在 cURL 里带上 /_/admin/app/{appId}/ 路径或手动指定",
 		})
+		return
+	}
+
+	// editID 非空表示「编辑已有凭据」：沿用原 id，只更新凭据与名字，
+	// 这样该账号已落盘的缓存目录（按 id 命名）继续有效。
+	editID := strings.TrimSpace(asString(payload["id"]))
+	if editID != "" {
+		if err := s.updateProfileCred(editID, cookie, csrf, host, scheme, appID, extra); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "更新失败：" + err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "appId": appID, "id": editID})
 		return
 	}
 

@@ -14,7 +14,7 @@
 
 ## 下载
 
-到 [Releases](https://github.com/f12998765/ImplBoard/releases) 取最新版本（当前 `0.0.7`）。
+到 [Releases](https://github.com/f12998765/ImplBoard/releases) 取最新版本（当前 `0.0.8`）。
 
 | 平台 | 文件 |
 | --- | --- |
@@ -65,13 +65,13 @@ ImplBoard/
 
 **只有推 tag 才会触发**（推 `main` 不会打包）。一次发版三步：
 
-1. 改 `goapp/mygo.json` 的 `version`（例如 `0.0.7`）；
+1. 改 `goapp/mygo.json` 的 `version`（例如 `0.0.8`）；
 2. 提交并推到 `main`；
 3. 打同名 tag 推上去：
 
 ```bash
-git commit -am "0.0.7"
-git tag 0.0.7
+git commit -am "0.0.8"
+git tag 0.0.8
 git push origin main --tags
 ```
 

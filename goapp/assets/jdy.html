@@ -977,8 +977,22 @@
     $("mask").style.display = modal ? "" : "none";
     $("authClose").style.display = modal ? "" : "none";
     $("authTitle").textContent = modal ? "登录态 / Cookie 管理" : "先接上登录态";
+    if (modal) { editingId = ""; $("authBtn").textContent = "保存并切换"; $("authMsg").textContent = ""; }
     loadProfiles();
     if (!modal) { try { $("authInput").focus(); } catch (e) {} }
+  }
+
+  // 正在编辑的凭据 id；空表示新增
+  var editingId = "";
+
+  function setEditing(id, name) {
+    editingId = id || "";
+    $("profName").value = name || "";
+    $("authBtn").textContent = editingId ? "保存修改" : "保存并切换";
+    $("authMsg").className = "authmsg";
+    $("authMsg").textContent = editingId ? "正在编辑「" + name + "」：粘贴新的 cURL 后保存，名字不改就留空。" : "";
+    $("authInput").value = "";
+    try { $("authInput").focus(); } catch (e) {}
   }
 
   function loadProfiles() {
@@ -994,6 +1008,7 @@
             '<div class="pmeta" title="' + esc(p.host + " / " + p.appId) + '">' + esc(meta) + "</div></div>" +
             '<div class="pact">' +
             (p.active ? '<span class="tag">使用中</span>' : '<button class="chip" data-act="switch">切换</button>') +
+            '<button class="chip" data-act="edit">编辑</button>' +
             '<button class="chip danger" data-act="del">删除</button></div></li>';
         }).join("");
       })
@@ -1006,12 +1021,20 @@
     var li = btn.closest("li");
     var id = li && li.getAttribute("data-id");
     if (!id) return;
+    var act = btn.getAttribute("data-act");
+    if (act === "edit") {
+      var li2 = btn.closest("li");
+      var pname = li2 ? li2.querySelector(".pname") : null;
+      setEditing(id, pname ? pname.textContent : "");
+      return;
+    }
     if (btn.getAttribute("data-act") === "switch") {
       btn.disabled = true;
       fetch("/api/auth/switch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: id }) })
         .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
         .then(function (res) {
           if (!res.ok) throw new Error(res.j && res.j.error ? res.j.error : "切换失败");
+          // 切过去之后凭据可能已失效：照样进入看板，只是列表/新数据会提示重新登录
           hideAuth();
           state.data = null; state.trend = null; state.appId = ""; state.day = "";
           state.apps = [];
@@ -1267,6 +1290,21 @@
     load(true);
   });
 
+  // 下拉里当前选中项的名字（用来在标题上显示所选应用包）
+  function selectedAppLabel() {
+    var sel = $("appSelect");
+    if (sel && sel.selectedIndex > -1) {
+      var opt = sel.options[sel.selectedIndex];
+      if (opt && opt.value) return opt.textContent || "";
+    }
+    var id = state.appId;
+    if (!id) return "—";
+    for (var i = 0; i < state.apps.length; i++) {
+      if (state.apps[i].appId === id) return appLabelOf(state.apps[i]);
+    }
+    return "应用 " + id.slice(0, 6) + "…";
+  }
+
   $("appSelect").addEventListener("change", function (e) {
     state.appId = e.target.value;
     try { if (state.appId) localStorage.setItem(LAST_KEY, JSON.stringify({ appId: state.appId })); } catch (err) {}
@@ -1275,7 +1313,7 @@
     state.collapsed = {};
     state.q = "";
     $("q").value = "";
-    $("appLabel").textContent = "—";
+    $("appLabel").textContent = selectedAppLabel();
     $("dateText").textContent = "—";
     $("genAt").textContent = "—";
     if (!state.appId) {
@@ -1345,14 +1383,19 @@
     $("authBtn").disabled = true;
     msg.className = "authmsg";
     msg.textContent = "验证中…";
-    fetch("/api/auth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ curl: text, name: $("profName").value.trim() }) })
+    var isEdit = !!editingId;
+    var body = { curl: text, name: $("profName").value.trim() };
+    if (isEdit) body.id = editingId;   // 编辑：沿用原 id，缓存目录不变
+    fetch("/api/auth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
-        if (!res.ok) throw new Error(res.j && res.j.error ? res.j.error : "验证失败");
+        if (!res.ok) throw new Error(res.j && res.j.error ? res.j.error : (isEdit ? "更新失败" : "验证失败"));
         msg.className = "authmsg ok";
-        msg.textContent = "连接成功，正在加载…";
+        msg.textContent = isEdit ? "已更新凭据" : "连接成功，正在加载…";
         $("authInput").value = "";
         $("profName").value = "";
+        editingId = "";
+        $("authBtn").textContent = "保存并切换";
         loadProfiles();
         hideAuth();
         state.data = null;
