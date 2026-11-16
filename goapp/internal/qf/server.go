@@ -249,6 +249,46 @@ func (s *Server) servePost(w http.ResponseWriter, r *http.Request) {
 		cfg.setActive(cfg.Profiles[len(cfg.Profiles)-1].ID)
 		s.cache.clearReports()
 
+	case "edit":
+		// 编辑已有凭据：沿用原 id（缓存目录按 id 命名，因此缓存保留），
+		// 只更新 token/wsid/名称。
+		id := asString(body["id"])
+		if id == "" {
+			writeJSON(w, http.StatusBadRequest, errorBody("缺少 id"))
+			return
+		}
+		info := parseCurl(asString(body["curl"]))
+		if info.Token == "" {
+			writeJSON(w, http.StatusBadRequest, errorBody(
+				"没有从 cURL 里解析到 token，请确认复制了 -H 'token: ...' 或 prodtoken cookie"))
+			return
+		}
+		if info.WSID == "" {
+			writeJSON(w, http.StatusBadRequest, errorBody(
+				"没有解析到 wsid（-H 'wsid: ...' 或 prodwsId cookie）"))
+			return
+		}
+		idx := -1
+		for i := range cfg.Profiles {
+			if cfg.Profiles[i].ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			writeJSON(w, http.StatusBadRequest, errorBody("没有这个账号"))
+			return
+		}
+		cfg.Profiles[idx].Token = info.Token
+		cfg.Profiles[idx].WSID = info.WSID
+		cfg.Profiles[idx].QFVersion = info.QFVersion
+		cfg.Profiles[idx].CookieExtra = info.CookieExtra
+		if name := asString(body["name"]); name != "" {
+			cfg.Profiles[idx].Name = name
+		}
+		cfg.setActive(id)
+		s.cache.clearReports()
+
 	case "switch":
 		id := asString(body["id"])
 		if id == "" {

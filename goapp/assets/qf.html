@@ -983,6 +983,7 @@
     $("mask").style.display = "";
     $("auth").style.display = "";
     $("authClose").style.display = "";
+    resetEditing();
     renderProfiles();
   }
   function closeAuth(){
@@ -1000,8 +1001,22 @@
           '<div class="pmeta">wsid '+esc(p.wsid)+'</div></div>'+
           '<div class="pact">'+(on? '<span class="tag">使用中</span>'
             : '<button class="chip" data-use="'+esc(p.id)+'">切换</button>')+
+          '<button class="chip" data-edit="'+esc(p.id)+'">编辑</button>'+
           '<button class="chip danger" data-del="'+esc(p.id)+'">删除</button></div></li>';
       }).join("");
+      Array.prototype.forEach.call($("profList").querySelectorAll("[data-edit]"), function(b){
+        b.onclick = function(){
+          var id = b.getAttribute("data-edit");
+          var prof = (list.filter(function(x){ return x.id===id; })[0]) || {name:""};
+          editingId = id;
+          $("profName").value = prof.name || "";
+          $("authBtn").textContent = "保存修改";
+          $("authMsg").className = "authmsg";
+          $("authMsg").textContent = "正在编辑「"+(prof.name||id)+"」：粘贴新的 cURL 后保存。";
+          $("authInput").value = "";
+          try { $("authInput").focus(); } catch (e) {}
+        };
+      });
       Array.prototype.forEach.call($("profList").querySelectorAll("[data-use]"), function(b){
         b.onclick = function(){
           api("/api/auth", {method:"POST", headers:{"content-type":"application/json"},
@@ -1026,18 +1041,32 @@
     });
   }
 
+  // 正在编辑的账号 id；空表示新增
+  var editingId = "";
+
+  function resetEditing(){
+    editingId = "";
+    $("authBtn").textContent = "解析并切换";
+    $("authMsg").textContent = "";
+  }
+
   function saveProfile(){
     var curl = $("authInput").value.trim();
     var msg = $("authMsg");
     msg.className = "authmsg"; msg.textContent = "";
     if(!curl){ msg.textContent = "先粘贴 cURL"; return; }
+    var isEdit = !!editingId;
+    var body = {op: isEdit ? "edit" : "add", curl:curl, name:$("profName").value.trim()};
+    if (isEdit) body.id = editingId;
     $("authBtn").disabled = true;
     api("/api/auth", {method:"POST", headers:{"content-type":"application/json"},
-      body: JSON.stringify({op:"add", curl:curl, name:$("profName").value.trim()})})
+      body: JSON.stringify(body)})
       .then(function(){
         msg.className = "authmsg ok";
-        msg.textContent = "已启用";
+        msg.textContent = isEdit ? "已更新凭据" : "已启用";
         $("authInput").value = "";
+        $("profName").value = "";
+        resetEditing();
         state.data = null;
         return loadAuth();
       })
